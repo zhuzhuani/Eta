@@ -74,6 +74,9 @@ internal class AgentRuntimeRunExecutor(
         request: AgentRuntimeWire.RunRequest,
     ): Outcome {
         val runController = session.controller
+        val automated = request.handoff?.source == "automation" ||
+            io.github.mangi.eta.agent.automation.AgentTaskScheduler.isRegistered(request.runId)
+        var automationExecutionLease: AgentAutomationExecutionLease? = null
         val archivedEvents = AgentRunArchiveStore.createEventBuffer(request.handoff)
         var entrySurfaceGuard: EntrySurfaceGuard? = null
         var toolExecutor: AutoCloseable? = null
@@ -88,9 +91,10 @@ internal class AgentRuntimeRunExecutor(
         // 失败清理需要在 try 外拿到会话 id。
         var memoryConversationId: String? = null
         val result = try {
+            if (automated) automationExecutionLease = AgentAutomationExecutionLease(appContext, runController)
             val contextWindow = request.config.knownContextWindow
             checkpointRecorder = AgentRunCheckpointRecorder.create(appContext, request)
-            entrySurfaceGuard = EntrySurfaceGuard.from(
+            entrySurfaceGuard = if (automated) null else EntrySurfaceGuard.from(
                 handoff = request.handoff,
                 logger = AndroidAgentLogger,
                 etaVoiceSurfaceDismissal = {
@@ -148,7 +152,7 @@ internal class AgentRuntimeRunExecutor(
             } else {
                 AgentMemoryContext.DISABLED
             }
-            if (request.config.terminalTools) {
+            if (request.config.terminalTools || automated) {
                 // 启动探测由 App 拥有；模型首轮等待其结果，避免把检测中的授权当成普通设备。
                 runBlocking {
                     while (io.github.mangi.eta.agent.device.RootAccess.state.value.isChecking) {
@@ -205,7 +209,14 @@ internal class AgentRuntimeRunExecutor(
                 screenshotExcludedPackages = {
                     entrySurfaceGuard?.consumeScreenshotExcludedPackages().orEmpty()
                 },
-                beforeToolExecution = { toolName ->
+                beforeToolExecution = beforeTool@ { toolName ->
+                    if (automated) {
+                        if (!io.github.mangi.eta.agent.automation.AgentTaskScheduler.canDispatch(appContext, request.runId)) {
+                            runController.cancel()
+                            runController.throwIfCancelled()
+                        }
+                        AgentAutomationToolPolicy.rejection(toolName)?.let { return@beforeTool it }
+                    }
                     val requiresAccessibility =
                         AgentToolRequirements.requiresAccessibility(toolName)
                     if (
@@ -225,7 +236,7 @@ internal class AgentRuntimeRunExecutor(
                                     code = accessibility.code,
                                     message = accessibility.message,
                                 )
-                            entrySurfaceGuard?.dismissOnce() == false ->
+                            !automated && entrySurfaceGuard?.dismissOnce() == false ->
                                 ToolExecutionDecision.Reject(
                                     code = "ENTRY_SURFACE_NOT_READY",
                                     message = "入口窗口关闭未完成；本次工具未执行，请勿在当前任务中重复调用",
@@ -242,6 +253,7 @@ internal class AgentRuntimeRunExecutor(
                 runAvailableSkillIds = skillContext.installedSkills.mapTo(mutableSetOf()) { it.id },
                 pendingSkillConflict = pendingSkillConflict,
                 virtualDisplayEnabled = { currentPermissions().virtualDisplay },
+                automation = automated,
             )
             val routingExecutor = RoutingToolExecutor(
                 local = executor,
@@ -441,6 +453,7 @@ internal class AgentRuntimeRunExecutor(
             runCatching { toolExecutor?.close() }
             runCatching { guiRun?.close() }
             runCatching { browserBinding?.close() }
+            runCatching { automationExecutionLease?.close() }
         }
 
         if (cancelled && session.isTerminal) {

@@ -187,6 +187,15 @@ class AgentToolCatalogTest {
         )
     }
 
+    @Test
+    fun scheduledTasksDoNotRequireMemoryAndAreHiddenInRoleplay() {
+        val normal = AgentToolCatalog.build(terminalTools = false, browserTools = false, memoryTools = false)
+        val roleplay = AgentToolCatalog.build(terminalTools = false, browserTools = false, memoryTools = true, memoryWritable = false)
+        assertTrue("tasks_create" in normal.toolNames())
+        assertTrue(roleplay.toolNames().none { it.startsWith("tasks_") })
+        assertTrue("memory_get" in roleplay.toolNames())
+    }
+
     private fun JSONArray.toolNames(): List<String> =
         (0 until length()).map { index ->
             getJSONObject(index).getJSONObject("function").getString("name")

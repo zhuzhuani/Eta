@@ -1,6 +1,9 @@
 name: PR Check
 
 on:
+  push:
+    branches:
+      - feature/scheduled-tasks
   pull_request:
     branches:
       - main
@@ -38,6 +41,14 @@ jobs:
           ./gradlew --no-daemon --no-configuration-cache --continue
           "-Peta.buildMetadata=${HEAD_SHA::7}"
           :app:lintDebug :app:testDebugUnitTest :app:assembleDebug
+
+      - name: 上传 Debug APK（无需 Release 签名）
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: eta-scheduled-debug-${{ github.run_number }}
+          path: app/build/outputs/apk/debug/Eta-v*.apk
+          if-no-files-found: error
+          retention-days: 14
 
       - name: 上传检查报告
         if: failure()

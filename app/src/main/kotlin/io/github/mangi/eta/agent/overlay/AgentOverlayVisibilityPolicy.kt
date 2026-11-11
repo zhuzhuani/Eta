@@ -37,9 +37,9 @@ internal object AgentOverlayVisibilityPolicy {
         handoffSource: String?,
         etaUiInForeground: Boolean,
         virtualDisplayActive: Boolean = false,
-    ): Boolean = !virtualDisplayActive &&
+    ): Boolean = handoffSource == "automation" || (!virtualDisplayActive &&
         etaUiInForeground &&
-        handoffSource == AgentRuntimeWire.AGENT_UI_HANDOFF_SOURCE
+        handoffSource == AgentRuntimeWire.AGENT_UI_HANDOFF_SOURCE)
 
     internal fun shouldShowResultCard(
         hasExecutedForegroundTool: Boolean,

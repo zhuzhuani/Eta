@@ -5,6 +5,7 @@ import android.os.Bundle
 import android.os.IBinder
 import android.os.Looper
 import android.os.Process
+import android.os.PowerManager
 import android.view.Display
 import android.view.Surface
 import io.github.mangi.eta.agent.accessibility.AccessibilityProtectionProtocol
@@ -75,6 +76,9 @@ internal object VirtualDisplayCommandMain {
     @Volatile
     private var retainedSurface: Surface? = null
 
+    @Volatile
+    private var retainedAutomationWakeLock: PowerManager.WakeLock? = null
+
     @JvmStatic
     @Suppress("DEPRECATION")
     fun main(args: Array<String>) {
@@ -113,6 +117,7 @@ internal object VirtualDisplayCommandMain {
     }
 
     private fun holdVirtualDisplay(request: JSONObject, reader: BufferedReader) {
+        val automation = request.optBoolean("automation", false)
         if (!CanvasRoutingPolicy.supportsBackgroundDisplay(android.os.Build.VERSION.SDK_INT)) {
             println(RESULT_PREFIX + JSONObject().put("ok", false).put("code", "DISPLAY_ISOLATION_UNSUPPORTED"))
             exitProcess(1)
@@ -132,7 +137,7 @@ internal object VirtualDisplayCommandMain {
         // 优先切换至 SYSTEM_UID (1000) 以通过 DisplayManagerService 对 ADD_TRUSTED_DISPLAY 与 CAPTURE_VIDEO_OUTPUT 的校验
         switchToSystemUidIfPossible()
 
-        val virtualDisplay = createTrustedVirtualDisplay(surface, width, height, densityDpi)
+        val virtualDisplay = createTrustedVirtualDisplay(surface, width, height, densityDpi, automation)
         if (virtualDisplay == null) {
             surface.release()
             println(RESULT_PREFIX + JSONObject().put("ok", false).put("code", "CREATE_DISPLAY_FAILED"))
@@ -149,6 +154,11 @@ internal object VirtualDisplayCommandMain {
 
         retainedVirtualDisplay = virtualDisplay
         retainedSurface = surface
+        if (automation && !acquireAutomationDisplayWakeLock(displayId)) {
+            releaseRetainedDisplay()
+            println(RESULT_PREFIX + JSONObject().put("ok", false).put("code", "DISPLAY_WAKE_LOCK_UNAVAILABLE"))
+            exitProcess(1)
+        }
         if (!CanvasRoutingPolicy.hasRequiredDisplayFlags(virtualDisplay.display.flags) ||
             !applyDisplayImePolicyHide(displayId)
         ) {
@@ -188,7 +198,50 @@ internal object VirtualDisplayCommandMain {
         exitProcess(0)
     }
 
+    private fun acquireAutomationDisplayWakeLock(displayId: Int): Boolean {
+        val power = runCatching {
+            val thread = Class.forName("android.app.ActivityThread").getMethod("systemMain").invoke(null)
+            val context = Class.forName("android.app.ActivityThread").getMethod("getSystemContext").invoke(thread) as android.content.Context
+            context.getSystemService(PowerManager::class.java)
+        }.getOrNull() ?: return false
+        val lock = runCatching {
+            val method = PowerManager::class.java.getMethod(
+                "newWakeLock", Int::class.javaPrimitiveType, String::class.java, Int::class.javaPrimitiveType,
+            )
+            (method.invoke(
+                power,
+                PowerManager.FULL_WAKE_LOCK or PowerManager.ACQUIRE_CAUSES_WAKEUP,
+                "Eta:automation-display-$displayId",
+                displayId,
+            ) as PowerManager.WakeLock).apply {
+                setReferenceCounted(false)
+                acquire(60_000L)
+            }
+        }.getOrNull() ?: return false
+        retainedAutomationWakeLock = lock
+        val startedAt = android.os.SystemClock.elapsedRealtime()
+        val manager = runCatching {
+            val thread = Class.forName("android.app.ActivityThread").getMethod("systemMain").invoke(null)
+            val context = Class.forName("android.app.ActivityThread").getMethod("getSystemContext").invoke(thread) as android.content.Context
+            context.getSystemService(android.hardware.display.DisplayManager::class.java)
+        }.getOrNull()
+        Thread({
+            while (retainedAutomationWakeLock === lock) {
+                try { Thread.sleep(20_000L) } catch (_: InterruptedException) { break }
+                if (manager?.getDisplay(displayId) == null || retainedAutomationWakeLock !== lock ||
+                    android.os.SystemClock.elapsedRealtime() - startedAt >= 30L * 60L * 1_000L
+                ) break
+                runCatching { lock.acquire(60_000L) }
+            }
+        }, "eta-automation-display-wakelock").apply { isDaemon = true; start() }
+        return true
+    }
+
     private fun releaseRetainedDisplay() {
+        retainedAutomationWakeLock?.let { lock ->
+            retainedAutomationWakeLock = null
+            runCatching { if (lock.isHeld) lock.release() }
+        }
         val vd = retainedVirtualDisplay
         val surf = retainedSurface
         retainedVirtualDisplay = null
@@ -287,6 +340,7 @@ internal object VirtualDisplayCommandMain {
         width: Int,
         height: Int,
         densityDpi: Int,
+        automation: Boolean,
     ): android.hardware.display.VirtualDisplay? = runCatching {
         val activityThreadClass = Class.forName("android.app.ActivityThread")
         val thread = activityThreadClass.getMethod("systemMain").invoke(null)
@@ -299,7 +353,7 @@ internal object VirtualDisplayCommandMain {
                 densityDpi,
             )
                 .setSurface(surface)
-                .setFlags(CanvasRoutingPolicy.TRUSTED_INTERACTIVE_FLAGS)
+                .setFlags(if (automation) CanvasRoutingPolicy.AUTOMATION_FLAGS else CanvasRoutingPolicy.TRUSTED_INTERACTIVE_FLAGS)
                 .build()
             val dmgClass = Class.forName("android.hardware.display.DisplayManagerGlobal")
             val dmg = dmgClass.getMethod("getInstance").invoke(null)
@@ -327,7 +381,7 @@ internal object VirtualDisplayCommandMain {
                 height,
                 densityDpi,
                 surface,
-                CanvasRoutingPolicy.TRUSTED_INTERACTIVE_FLAGS,
+                if (automation) CanvasRoutingPolicy.AUTOMATION_FLAGS else CanvasRoutingPolicy.TRUSTED_INTERACTIVE_FLAGS,
             )
         }
     }.getOrNull()

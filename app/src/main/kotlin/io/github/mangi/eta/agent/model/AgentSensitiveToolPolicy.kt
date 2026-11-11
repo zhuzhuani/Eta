@@ -45,5 +45,7 @@ internal object AgentSensitiveToolPolicy {
         "memory_write",
         "character_memory_get",
         "character_memory_write",
+        "tasks_triggers", "tasks_list", "tasks_create", "tasks_update",
+        "tasks_delete", "tasks_run", "tasks_cancel", "tasks_history",
     )
 }

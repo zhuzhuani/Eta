@@ -91,6 +91,7 @@ class AgentAccessibilityService : AccessibilityService() {
         },
         ThreadPoolExecutor.DiscardOldestPolicy(),
     )
+    private var lastTriggerPackage: String? = null
     private val windowContentGenerations = WindowContentGenerations()
     private val queryExecutor = AccessibilityQueryExecutor()
     @Volatile
@@ -134,6 +135,20 @@ class AgentAccessibilityService : AccessibilityService() {
                     bumpWindowContentGeneration(event.windowId)
                 }
                 signalWindowChanged()
+                if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+                    val foregroundPackage = event.packageName?.toString().orEmpty()
+                    val eventWindow = windows.firstOrNull { it.id == event.windowId }
+                    if (eventWindow?.displayId == android.view.Display.DEFAULT_DISPLAY &&
+                        foregroundPackage.isNotBlank() && foregroundPackage != lastTriggerPackage) {
+                        lastTriggerPackage = foregroundPackage
+                        if (foregroundPackage != packageName) {
+                            io.github.mangi.eta.agent.automation.AgentTaskScheduler.publish(
+                                this, "app_foreground", "${event.eventTime}:$foregroundPackage",
+                                org.json.JSONObject().put("packageName", foregroundPackage),
+                            )
+                        }
+                    }
+                }
             }
             AccessibilityEvent.TYPE_VIEW_SCROLLED -> {
                 bumpWindowContentGeneration(event.windowId)

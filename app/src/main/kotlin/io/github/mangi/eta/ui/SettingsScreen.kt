@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.MenuBook
 import androidx.compose.material.icons.rounded.AccessibilityNew
+import androidx.compose.material.icons.rounded.Alarm
 import androidx.compose.material.icons.rounded.AccountTree
 import androidx.compose.material.icons.rounded.BugReport
 import androidx.compose.material.icons.rounded.Cloud
@@ -449,6 +450,12 @@ private fun SettingsPageContent(
 
                 Group(title = stringResource(R.string.ui_tool_a72ef1)) {
                     CouiPreference(
+                        title = stringResource(R.string.automation_title),
+                        icon = { CouiSettingsIcon(Icons.Rounded.Alarm, SettingsIconColors.Orange) },
+                        onClick = { onNavigate(AppRoute.Tasks) },
+                    )
+                    CouiIconDivider()
+                    CouiPreference(
                         title = stringResource(R.string.settings_tools_list),
                         icon = { CouiSettingsIcon(Icons.Rounded.Dashboard, SettingsIconColors.Green) },
                         onClick = { onNavigate(AppRoute.Tools) },
@@ -872,6 +879,11 @@ private fun SettingsPageContent(
                 item(key = "section_tools") {
                     SmallTitle(stringResource(R.string.ui_tool_a72ef1))
                     SettingsGroupCard {
+                        ArrowPreference(
+                            title = stringResource(R.string.automation_title),
+                            startAction = { SettingsIcon(Icons.Rounded.Alarm, tint = SettingsIconColors.Orange) },
+                            onClick = { onNavigate(AppRoute.Tasks) },
+                        )
                         ArrowPreference(
                             title = stringResource(R.string.settings_tools_list),
                             startAction = { SettingsIcon(Icons.Rounded.Dashboard, tint = SettingsIconColors.Green) },

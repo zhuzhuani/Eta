@@ -61,6 +61,7 @@ internal object VirtualDisplayController {
     private var highFrequencyPreview: Boolean = false
 
     private var displayResources: VirtualDisplaySessionResources? = null
+    private var automationToken: VirtualDisplaySessionState.Token? = null
     private var latestFullBitmap: Bitmap? = null
     private var lastUiFrameAtElapsedMs: Long = 0L
     private val mutedPackages = linkedSetOf<String>()
@@ -85,20 +86,63 @@ internal object VirtualDisplayController {
         sessionState.active?.displayId ?: Display.DEFAULT_DISPLAY
     }
 
+    internal fun isAutomationLeaseCurrent(token: VirtualDisplaySessionState.Token, displayId: Int): Boolean =
+        synchronized(lock) {
+            automationToken === token && sessionState.isCurrent(token) &&
+                sessionState.active?.displayId == displayId && displayResources?.let { resources ->
+                    (resources.bridge == null || resources.bridge.isAlive) &&
+                        resources.manager?.let { isDisplayUsable(it, displayId) } == true
+                } == true
+        }
+
     /**
      * 确保受信任虚拟屏已就绪并返回其 displayId；不可用时返回 null，由调用方平滑回退至物理主屏。
      */
     fun ensureVirtualDisplay(
         context: Context,
         rootAvailable: () -> Boolean = { RootAccess.isGranted },
+    ): Int? = ensureVirtualDisplayInternal(context, rootAvailable, automation = false)
+
+    /** Acquires a dedicated display for one automated run; it never reuses a manual session. */
+    fun acquireAutomationDisplay(
+        context: Context,
+        rootAvailable: () -> Boolean,
+    ): AutomationDisplayLease? {
+        if (!rootAvailable()) return null
+        val appContext = context.applicationContext
+        return synchronized(creationLock) {
+            val id = ensureVirtualDisplayInternal(appContext, rootAvailable, automation = true) ?: return null
+            val token = synchronized(lock) {
+                automationToken?.takeIf { current ->
+                    sessionState.isCurrent(current) && sessionState.active?.displayId == id
+                }
+            } ?: return null
+            if (!rootAvailable()) {
+                releaseSession(appContext, rootAvailable, token)
+                return null
+            }
+            AutomationDisplayLease(id, { rootAvailable() && isAutomationLeaseCurrent(token, id) }) {
+                releaseSession(appContext, rootAvailable, token)
+            }
+        }
+    }
+
+    private fun ensureVirtualDisplayInternal(
+        context: Context,
+        rootAvailable: () -> Boolean,
+        automation: Boolean,
     ): Int? {
         if (!CanvasRoutingPolicy.supportsBackgroundDisplay(Build.VERSION.SDK_INT)) return null
         val appContext = context.applicationContext
         val manager = appContext.getSystemService(DisplayManager::class.java) ?: return null
         // 创建可包含 Binder 与 Root 等待；发布状态和释放不等待这把创建锁。
         synchronized(creationLock) {
-            val existing = synchronized(lock) { sessionState.active }
+            val existing = synchronized(lock) {
+                if (!automation && automationToken != null) return null
+                sessionState.active
+            }
             if (existing != null) {
+                if (automation) return null
                 val bridge = synchronized(lock) { displayResources?.bridge }
                 if ((bridge == null || bridge.isAlive) && isDisplayUsable(manager, existing.displayId)) {
                     synchronized(lock) {
@@ -107,7 +151,9 @@ internal object VirtualDisplayController {
                 }
                 releaseSession(appContext, rootAvailable, existing.token)
             }
-            val token = synchronized(lock) { sessionState.begin() }
+            val token = synchronized(lock) {
+                sessionState.begin().also { if (automation) automationToken = it }
+            }
             val frameWorker = HandlerThread("eta-virtual-display-frame")
             var reader: ImageReader? = null
             var inProcessDisplay: VirtualDisplay? = null
@@ -123,7 +169,7 @@ internal object VirtualDisplayController {
                 frames.setOnImageAvailableListener(::onFrameAvailable, handler)
                 if (rootAvailable()) {
                     rootBridge = RootVirtualDisplayBridge.create(
-                        appContext, frames.surface, width, height, densityDpi, rootAvailable,
+                        appContext, frames.surface, width, height, densityDpi, rootAvailable, automation,
                     ) { process ->
                         val ownsSession = synchronized(lock) {
                             sessionState.isCurrent(token) && displayResources?.bridge?.process === process
@@ -131,10 +177,11 @@ internal object VirtualDisplayController {
                         if (ownsSession) releaseSession(appContext, rootAvailable, token)
                     }
                 }
+                if (automation && rootBridge == null) return null
                 val id = rootBridge?.displayId ?: run {
                     if (EtaApp.serviceInstance == null) return null
                     inProcessDisplay = tryCreateInProcessVirtualDisplay(
-                        appContext, frames.surface, width, height, densityDpi,
+                        appContext, frames.surface, width, height, densityDpi, automation,
                     )
                     inProcessDisplay?.display?.displayId ?: return null
                 }
@@ -171,7 +218,10 @@ internal object VirtualDisplayController {
                 return null
             } finally {
                 if (!accepted) {
-                    synchronized(lock) { sessionState.invalidate(token) }
+                    synchronized(lock) {
+                        sessionState.invalidate(token)
+                        if (automationToken === token) automationToken = null
+                    }
                     VirtualDisplaySessionResources(
                         reader, frameWorker, inProcessDisplay, rootBridge, manager, listener,
                     ).close()
@@ -200,14 +250,21 @@ internal object VirtualDisplayController {
         launchIntent: Intent,
         rootAvailable: () -> Boolean = { RootAccess.isGranted },
         checkCancellation: () -> Unit = {},
+        automationLease: AutomationDisplayLease? = null,
     ): Int? {
         checkCancellation()
-        val displayId = ensureVirtualDisplay(context, rootAvailable) ?: return null
+        val displayId = if (automationLease != null) {
+            if (!automationLease.isValid()) return null
+            automationLease.displayId
+        } else {
+            ensureVirtualDisplay(context, rootAvailable) ?: return null
+        }
         checkCancellation()
         val appContext = context.applicationContext
         mutePackageAudioFocusIfPossible(appContext, packageName, rootAvailable)
 
         var launchedByRoot = false
+        if (automationLease != null && (!automationLease.isValid() || !rootAvailable())) return null
         if (rootAvailable()) {
             val userId = DeviceToolContract.appUserId(appContext)
             val component = launchIntent.component?.flattenToShortString()
@@ -222,8 +279,10 @@ internal object VirtualDisplayController {
             }
         }
 
+        if (!launchedByRoot && automationLease != null) return null
         if (!launchedByRoot) {
             checkCancellation()
+            if (automationLease != null && !automationLease.isValid()) return null
             val startedInProcess = runCatching {
                 val intent = Intent(launchIntent).apply {
                     addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
@@ -240,6 +299,7 @@ internal object VirtualDisplayController {
             if (!startedInProcess) return null
         }
 
+        if (automationLease != null && !automationLease.isValid()) return null
         synchronized(lock) {
             val current = mutableSnapshots.value
             if (current.active && current.displayId == displayId) {
@@ -262,11 +322,18 @@ internal object VirtualDisplayController {
         targetLabel: String,
         rootAvailable: () -> Boolean = { RootAccess.isGranted },
         checkCancellation: () -> Unit = {},
+        automationLease: AutomationDisplayLease? = null,
     ): Int? {
         checkCancellation()
-        val displayId = ensureVirtualDisplay(context, rootAvailable) ?: return null
+        val displayId = if (automationLease != null) {
+            if (!automationLease.isValid()) return null
+            automationLease.displayId
+        } else {
+            ensureVirtualDisplay(context, rootAvailable) ?: return null
+        }
         checkCancellation()
         val appContext = context.applicationContext
+        if (automationLease != null && !automationLease.isValid()) return null
         val started = runCatching {
             val launch = Intent(intent).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             val options = ActivityOptions.makeBasic().setLaunchDisplayId(displayId)
@@ -274,8 +341,10 @@ internal object VirtualDisplayController {
             true
         }.getOrDefault(false)
 
+        if (!started && automationLease != null) return null
         if (!started && rootAvailable()) {
             checkCancellation()
+            if (automationLease != null && !automationLease.isValid()) return null
             val uriString = intent.dataString ?: return null
             val userId = DeviceToolContract.appUserId(appContext)
             val exec = BoundedRootCommandExecutor(AndroidAgentLogger, rootAvailable = rootAvailable)
@@ -292,6 +361,7 @@ internal object VirtualDisplayController {
             return null
         }
 
+        if (automationLease != null && !automationLease.isValid()) return null
         synchronized(lock) {
             val current = mutableSnapshots.value
             if (current.active && current.displayId == displayId) {
@@ -313,6 +383,7 @@ internal object VirtualDisplayController {
         rootAvailable: () -> Boolean = { RootAccess.isGranted },
     ): Boolean {
         val snapshot = synchronized(lock) {
+            if (automationToken != null) return false
             val current = mutableSnapshots.value
             if (!current.active || !CanvasRoutingPolicy.isVirtualDisplay(current.displayId)) {
                 return false
@@ -516,7 +587,9 @@ internal object VirtualDisplayController {
     ) {
         val resources = synchronized(lock) {
             if (expected != null && !sessionState.isCurrent(expected)) return
+            if (expected == null && automationToken != null) return
             sessionState.invalidate()
+            if (automationToken === expected || expected == null) automationToken = null
             highFrequencyPreview = false
             mutableSnapshots.value = VirtualDisplaySnapshot.Inactive
             if (context != null && mutedPackages.isNotEmpty()) {
@@ -645,6 +718,7 @@ internal object VirtualDisplayController {
         width: Int,
         height: Int,
         densityDpi: Int,
+        automation: Boolean = false,
     ): VirtualDisplay? = runCatching {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
             runCatching { HiddenApiBypass.addHiddenApiExemptions("Landroid/hardware/display/") }
@@ -658,7 +732,7 @@ internal object VirtualDisplayController {
                 densityDpi,
             )
                 .setSurface(surface)
-                .setFlags(CanvasRoutingPolicy.TRUSTED_INTERACTIVE_FLAGS)
+                .setFlags(if (automation) CanvasRoutingPolicy.AUTOMATION_FLAGS else CanvasRoutingPolicy.TRUSTED_INTERACTIVE_FLAGS)
                 .build()
             dm.createVirtualDisplay(config)
         } else {
@@ -668,7 +742,7 @@ internal object VirtualDisplayController {
                 height,
                 densityDpi,
                 surface,
-                CanvasRoutingPolicy.TRUSTED_INTERACTIVE_FLAGS,
+                if (automation) CanvasRoutingPolicy.AUTOMATION_FLAGS else CanvasRoutingPolicy.TRUSTED_INTERACTIVE_FLAGS,
             )
         }
     }.getOrNull()

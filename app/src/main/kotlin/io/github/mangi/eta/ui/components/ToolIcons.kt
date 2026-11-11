@@ -97,7 +97,9 @@ internal fun iconForTool(toolId: String): ImageVector = when (toolId) {
     "skills_list", "skills_read", "skills_read_resource",
     "skills_list_curated", "skills_inspect_github", "skills_install_from_github",
         -> Icons.Rounded.Extension
-    "set_alarm", "set_timer", "list_alarms", "list_active_timers" ->
+    "set_alarm", "set_timer", "list_alarms", "list_active_timers",
+    "tasks_triggers", "tasks_list", "tasks_create", "tasks_update",
+    "tasks_delete", "tasks_run", "tasks_cancel", "tasks_history" ->
         Icons.Rounded.Alarm
     "device_status", "set_device_state", "get_device_environment" ->
         Icons.Rounded.Smartphone

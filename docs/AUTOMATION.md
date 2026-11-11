@@ -1,0 +1,82 @@
+# 定时与事件任务
+
+在聊天中说「每个工作日早上九点整理今天的日程」即可创建任务。模型应先调用 `tasks_triggers` 查询当前设备能力，再保存规则。
+
+「设置 → 自动任务」提供任务列表、详情、启用/暂停、立即运行、取消、删除、最近执行记录和触发器能力目录。创建和修改规则使用聊天工具；列表只显示任务名和一行规则摘要，完整目标在详情页查看。
+
+## 工具与规则
+
+- `tasks_triggers`：当前支持的触发器、权限与后台监控状态。
+- `tasks_list` / `tasks_history`：任务及执行记录。
+- `tasks_create` / `tasks_update`：创建或修改；修改必须携带最新 `expectedUpdatedAt`，防止并发覆盖。
+- `tasks_run` / `tasks_cancel` / `tasks_delete`：手动运行、取消、删除。
+
+支持 23 种时间与事件来源：
+
+| 类别 | 触发器 |
+| --- | --- |
+| 时间 | `once`（带偏移 ISO 时间）、`interval`（至少 900 秒）、`daily`（HH:mm、IANA 时区，可选周一至周日 1–7） |
+| 通知与应用 | `notification_posted`、`notification_removed`、`app_foreground` |
+| 设备 | `device_unlocked`、`screen_on`、`screen_off`、`charging_connected`、`charging_disconnected`、`battery_low`、`battery_okay` |
+| 连接 | 网络、蓝牙、耳机各自的 `*_connected` / `*_disconnected` |
+| Eta / 系统 | `device_boot`、`memory_updated`、`task_completed`、`task_failed` |
+
+通知需要通知读取授权，前台应用需要无障碍服务（仅主屏、包名变化时），蓝牙需要连接授权。通知可按包名、标题、正文包含文本筛选；Eta 自身通知不会触发。任务结果触发必须指定来源 `filters.taskId`，忽略自身结果。
+
+所有规则可带 `conditions`：`charging`、`unlocked`、`networkConnected`，按 AND 匹配。默认冷却 900 秒，可设 60–86400 秒；每个任务最多运行 1–10000 次。未授权的已实现来源可用 `enabled=false` 保存草稿。暂停任务可手动运行，但不能越过次数上限或同任务单实例限制。
+
+```json
+{"name":"工作日日程","prompt":"整理今天的日程并给出摘要","trigger":{"type":"daily","time":"09:00","timeZone":"Asia/Shanghai","weekdays":[1,2,3,4,5],"conditions":{"networkConnected":true}},"cooldownSeconds":900,"maxRuns":30}
+```
+
+## 执行语义与安全边界
+
+- Room 保存任务与运行记录；`(taskId, fireKey)` 去重，同任务只能有一个排队或执行中的实例。取消请求先持久化，再发送 Runtime 取消消息；启动入场和工具执行前会复核取消状态与条件，防止先取消、后启动的竞态。
+- AlarmManager + 持久化 JobScheduler 使用**非精确定时**，受省电与 ROM 后台限制，可能延迟，不能代替准点闹钟。错过的周期合并，不逐次补跑。
+- 离线或执行条件不满足时保留队列。无有效模型配置标记 `configuration_required`，不消耗执行次数；补全配置后可手动运行。
+- 进程被系统终止后，运行中的操作标记 `interrupted` 并计入次数，不自动重放不确定操作。仅模型网络失败、尚未开始任何工具时，按有限退避重试；工具已开始、权限错误、上下文错误或未知错误均不重试。
+- 前台用户请求优先；后台入场时再次检查忙碌状态，用户新请求会取消正在执行的自动任务。
+- 自动任务允许 GUI，但 GUI 工具只能使用本次执行独占的虚拟屏，不能接管现有手动虚拟屏；创建失败、Root 撤销、会话失效均报错，不回退主屏。普通聊天默认路由不变。内置离屏浏览器允许使用，但禁止 `present_to_user`、系统面板、HOME/RECENTS 等全局按键和任何 `tasks_*` 调用。
+- 终端、文件、网页获取、MCP 等工具仍遵循当前模型与 Eta 原有权限，**不是安全沙盒**；虚拟屏路由限制不等于拦截所有 Root 命令或第三方应用行为。角色扮演会话不发布任务工具。
+- 系统事件监控服务仅在需要它的事件任务启用时运行。通知正文只在内存匹配，事件持久化仅保留来源、包名、来源任务 ID 或网络类别。监控停止期间的事件不补发。
+- 执行使用当前已选模型配置，复用最新官方 Runtime 的归档机制；结果按任务归入会话，可从通知打开。
+
+## GUI 与息屏执行
+
+1. 设备需 Android 14 及以上，授予 Eta Root 和无障碍权限，并启用原有虚拟屏及相关工具开关。只有 Root、不满足系统独立焦点/虚拟屏能力，仍无法执行 GUI。
+2. 自动任务第一次调用 GUI 工具时申请独占虚拟屏；先 `launch_app` / `open_uri`，再观察和操作。亮屏时不把正在主屏前台使用的应用拉走；息屏时允许尝试把该应用启动到虚拟屏。
+3. 执行期使用 CPU 部分唤醒锁；Root 辅助进程使用明确绑定虚拟 `displayId` 的显示唤醒锁。不能获取显示专属锁则拒绝 GUI，不使用主屏唤醒、解锁或全局省电豁免。显示锁按 60 秒超时、20 秒续期，执行资源上限 30 分钟；系统可以更早停止任务。
+4. 完成、取消、前台请求抢占或失效时释放本次会话及唤醒锁。自动任务虚拟屏使用 `DESTROY_CONTENT_ON_REMOVAL`，请求系统销毁其任务栈而非释放后迁回主屏；旧句柄不能释放后续会话。普通手动虚拟屏仍使用官方默认标志。
+5. 自动任务不显示主屏控制浮层、结果浮卡或保持主屏常亮；执行通知仍保留。锁屏密码、应用登录/生物认证、支付确认、`FLAG_SECURE` 内容不绕过。依赖人工授权的任务应报告并停止，而不是反复尝试。
+6. 若任务设置了 `conditions.unlocked=true`，锁屏时不会执行，即使 Root 可用；要测试息屏任务，不要同时添加这个条件。息屏不一定等于设备已锁定。
+
+这提供的是**在兼容设备上尝试息屏后台执行的代码路径**，不是对所有 ROM、应用或杀后台策略的保证。建议先用无副作用的读取/截图任务做真机验收，再测试取消、前台抢占、Root 撤销、屏幕状态切换和系统终止后的恢复。准时性仍完全沿用上述非精确定时语义。
+
+## 移植基线
+
+- 官方 `Mangi-11/Eta`：`924eaa9d834f525d899f542bf8c3d73c40853b62`（2026-11-11 核对 `main` 最新提交），版本 3.4.2。
+- 功能来源 `Oo0520/Eta-por`：`58a1faec3cdc1a43bac55f2617729710429bd15f`，仅选择性移植任务相关代码，并适配官方现有 Runtime、数据库和 Miuix UI API。
+- 保留官方 JDK 25、SDK 37、Gradle 9.7.1 和已有版本/签名配置，不以旧 fork 全量覆盖官方代码。
+
+## 数据库与升级范围
+
+本次基于官方数据库版本 25 增加 `25 → 26` 迁移，不修改官方已有迁移链，不使用破坏性迁移。支持全新安装和官方 25 的升级。
+
+这不是整个 Eta-por 的合并：以官方虚拟屏为基础增加了自动任务专用的独占会话和有界息屏执行支持，未整体移植 fork 的虚拟屏增强、全局 Root 保活或自动备份。普通聊天与手动虚拟屏的默认行为保留。若旧 fork 的数据库版本高于 26，或包含额外表/迁移，**不要直接覆盖安装**：请先备份并确认单独的数据迁移方案。本次未验证旧 fork 数据库降级，也未宣称兼容。
+
+## GitHub Actions 打包
+
+向自己的 fork `zhuzhuani/Eta` 推送 `feature/scheduled-tasks` 分支会自动触发 **PR Check**：执行 Lint、单元测试和 Debug 构建，成功后上传 `eta-scheduled-debug-<run_number>` APK artifact，不需要 Release 签名 Secrets。保留 `pull_request` 和 `workflow_dispatch` 入口；后续可在 Actions 页面查看构建，或对已有运行使用 Re-run jobs。
+
+原有 **Eta Build** 发布流程保持不变，仍要求配置 Release 签名 Secrets。这里只构建 Debug APK，不自动合并到 `main`、覆盖 `etax-main` 或发布 Release。
+
+## 本次验证记录（2026-11-11）
+
+- 官方工具链执行 `bash ./gradlew :app:testDebugUnitTest :app:lintDebug --no-daemon --continue` 成功。
+- GUI 扩展后的最终源码共 2042 项单元测试：2041 通过、0 失败、1 跳过。跳过的是原有 `EtaWaveShaderTest.effectCompilesWithAndroidShaderCompiler`，本机 Robolectric 原生渲染器不支持 child shader，与任务功能无关。
+- 规则、重试、工具 schema、后台工具策略、DAO 取消/去重/恢复、调度排队和数据库迁移相关测试均通过；新增独占句柄、显示标志、GUI 拒绝主屏回退、CPU 锁释放/超时、自动任务浮层抑制等测试。原有手动虚拟屏路由测试继续通过。
+- Lint 0 错误，428 个 Warning、1 个 Hint；这些不是零告警构建，包含已有风格建议和显示专属唤醒锁等隐藏 API 的兼容性警告。
+- 调度器、时间/重启接收器、重试策略与初次任务交付逐字节一致，未添加精确闹钟权限；官方构建工具链及数据库迁移没有因 GUI 扩展再次改变。
+- 英文、简体、繁体各 92 个任务资源 ID 一致，全部代码引用及格式占位符检查通过。
+- 尚未在真机验证各 ROM 的息屏、重启和省电调度；本地未组装或安装 APK，最终 APK 可由上述 Actions 生成。
+- 交付分支为 `feature/scheduled-tasks`，基于上述官方提交。`origin` 指向自己的 fork `zhuzhuani/Eta`，`upstream` 指向官方 `Mangi-11/Eta`，`donor` 仅作为功能来源指向 `Oo0520/Eta-por`；原有旧工作目录未改动。

@@ -380,6 +380,27 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
             sendResultTo(replyTo, AgentRuntimeWire.RunResult(request.runId, false, "", "Agent Runtime 服务已停止"))
             return null
         }
+        // Recheck on the runtime's serialized admission path: the earlier JobService
+        // active-run query alone cannot prevent a foreground request racing this one.
+        val automated = request.handoff?.source == "automation" ||
+            io.github.mangi.eta.agent.automation.AgentTaskScheduler.isRegistered(request.runId)
+        // Cancellation is persisted before IPC. A cancel message may arrive before
+        // this start message, so the in-memory session registry is not enough.
+        if (automated && !io.github.mangi.eta.agent.automation.AgentTaskScheduler.canDispatch(this, request.runId)) {
+            incoming?.close()
+            sendRequestIngestedTo(replyTo, request.runId)
+            sendResultTo(replyTo, AgentRuntimeWire.RunResult(request.runId, false, "", "AUTOMATION_CANCELLED"))
+            return null
+        }
+        if (automated && runs.all().any { it.runId != request.runId }) {
+            incoming?.close()
+            sendRequestIngestedTo(replyTo, request.runId)
+            sendResultTo(replyTo, AgentRuntimeWire.RunResult(request.runId, false, "", "AUTOMATION_RUNTIME_BUSY"))
+            return null
+        }
+        if (!automated) {
+            runs.all().filter { it.request.handoff?.source == "automation" }.forEach { cancelRun(it.runId) }
+        }
         val admission = runs.admit(request) {
             lateinit var session: AgentRuntimeSession
             session = AgentRuntimeSession(
@@ -918,9 +939,11 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
 
     private fun updateKeepScreenOn() {
         val guiState = guiControl.state.value
-        val session = guiState.ownerRunId?.let(runs::get)?.session
+        val owner = guiState.ownerRunId?.let(runs::get)
+        val session = owner?.session
         setKeepScreenOn(
-            !guiState.userPaused && session != null && !session.isTerminal &&
+            owner?.request?.handoff?.source != "automation" &&
+                !guiState.userPaused && session != null && !session.isTerminal &&
                 !session.controller.isCancelled && !session.controller.isPaused,
         )
     }
@@ -930,7 +953,9 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
         val owner = guiState.ownerRunId?.let(runs::get)
         if (owner != null && displayedRun !== owner) {
             bindDisplayedRun(owner)
-            AgentHapticFeedback.perform(this, AgentHapticFeedback.Type.RUN_STARTED)
+            if (owner.request.handoff?.source != "automation") {
+                AgentHapticFeedback.perform(this, AgentHapticFeedback.Type.RUN_STARTED)
+            }
         }
         when {
             guiState.userPaused -> {

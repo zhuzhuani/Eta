@@ -117,6 +117,15 @@ class CanvasRoutingPolicyTest {
     }
 
     @Test
+    fun automationAddsDestroyOnRemovalWithoutChangingManualFlags() {
+        assertEquals(
+            CanvasRoutingPolicy.TRUSTED_INTERACTIVE_FLAGS or CanvasRoutingPolicy.FLAG_DESTROY_CONTENT_ON_REMOVAL,
+            CanvasRoutingPolicy.AUTOMATION_FLAGS,
+        )
+        assertFalse((CanvasRoutingPolicy.TRUSTED_INTERACTIVE_FLAGS and CanvasRoutingPolicy.FLAG_DESTROY_CONTENT_ON_REMOVAL) != 0)
+    }
+
+    @Test
     fun backgroundDisplayRequiresAndroid14FocusIsolation() {
         assertFalse(CanvasRoutingPolicy.supportsBackgroundDisplay(33))
         assertTrue(CanvasRoutingPolicy.supportsBackgroundDisplay(34))

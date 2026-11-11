@@ -6,6 +6,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import io.github.mangi.eta.R
 import io.github.mangi.eta.agent.memory.AgentMemoryContextBuilder
+import io.github.mangi.eta.agent.automation.AgentTaskScheduler
 import io.github.mangi.eta.core.AndroidAgentLogger
 import io.github.mangi.eta.core.safeLogType
 import io.github.mangi.eta.data.repository.AgentMemoryRepository
@@ -108,6 +109,7 @@ internal class AgentMemoryStore(
             runCatching { AgentMemoryRepository.replaceAll(target) }
                 .fold(
                     onSuccess = { snapshot ->
+                        AgentTaskScheduler.publish(appContext, "memory_updated", snapshot.revision)
                         withContext(Dispatchers.Main) {
                             memoryState = memoryState.copy(
                                 isSaving = false,
@@ -143,7 +145,8 @@ internal class AgentMemoryStore(
         scope.launch(Dispatchers.IO) {
             runCatching { AgentMemoryRepository.replaceAll("") }
                 .fold(
-                    onSuccess = {
+                    onSuccess = { snapshot ->
+                        AgentTaskScheduler.publish(appContext, "memory_updated", snapshot.revision)
                         withContext(Dispatchers.Main) {
                             memoryState = memoryState.copy(
                                 isSaving = false,

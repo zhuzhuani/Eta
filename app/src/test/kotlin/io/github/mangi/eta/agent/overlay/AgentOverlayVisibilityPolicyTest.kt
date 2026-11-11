@@ -56,6 +56,16 @@ class AgentOverlayVisibilityPolicyTest {
     }
 
     @Test
+    fun automationNeverShowsPhysicalScreenOverlayOrResultCard() {
+        listOf(false, true).forEach { foreground ->
+            listOf(false, true).forEach { virtual ->
+                assertTrue(AgentOverlayVisibilityPolicy.shouldSuppressOverlayInEtaUi("automation", foreground, virtual))
+            }
+            assertFalse(AgentOverlayVisibilityPolicy.shouldShowResultCard(true, "automation", foreground))
+        }
+    }
+
+    @Test
     fun etaUiRunsSuppressOverlayAndResultCardOnlyWhileEtaIsInForeground() {
         assertTrue(
             AgentOverlayVisibilityPolicy.shouldSuppressOverlayInEtaUi(

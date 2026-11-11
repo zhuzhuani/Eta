@@ -116,9 +116,11 @@ internal class AgentLocalTools(
     private val lsposedAvailable: () -> Boolean = { EtaApp.serviceInstance != null },
     private val guiControl: GuiControlCoordinator.RunControl? = null,
     browserSession: AgentBrowserSession? = null,
+    private val automation: Boolean = false,
 ) : AgentModelClient.ToolExecutor, AutoCloseable {
 
     private val closed = AtomicBoolean(false)
+    private val automationDisplay = AtomicReference<io.github.mangi.eta.agent.virtualdisplay.AutomationDisplayLease?>()
     @Volatile
     private var activeDisplayId: Int = Display.DEFAULT_DISPLAY
     private val browserSessionRef = lazy { browserSession ?: AgentBrowserSession() }
@@ -178,6 +180,7 @@ internal class AgentLocalTools(
         rootCommandExecutor.close()
         githubSkillSource?.close()
         inspectedGitHubSnapshots.clear()
+        automationDisplay.getAndSet(null)?.close()
         guiControl?.close()
     }
 
@@ -209,8 +212,17 @@ internal class AgentLocalTools(
                     sensitive = AgentSensitiveToolPolicy.isSensitive(toolCall.name),
                 )
             }
+            if (!memoryWritable && toolCall.name in io.github.mangi.eta.agent.automation.AgentTaskTools.names) {
+                return@runCatching textResult(errorResult("AUTOMATION_ROLEPLAY_UNAVAILABLE", "角色会话不能管理现实自动任务"))
+            }
             deviceToolPermissionError(toolCall.name)?.let { return@runCatching it }
             memoryToolPermissionError(toolCall.name)?.let { return@runCatching it }
+            if (automation) {
+                val policy = io.github.mangi.eta.agent.runtime.AgentAutomationToolPolicy
+                val rejection = if (AgentToolRequirements.hasForegroundIntentFallback(toolCall.name)) null
+                    else policy.rejection(toolCall.name) ?: policy.argumentRejection(toolCall.name, args)
+                rejection?.let { return@runCatching textResult(errorResult(it.code, it.message)) }
+            }
             if (guiGeneration != null && publishedObservation.get().generation != guiGeneration) {
                 publishedObservation.set(PublishedObservation())
                 if (AgentToolRequirements.requiresFreshObservation(toolCall.name)) {
@@ -236,7 +248,14 @@ internal class AgentLocalTools(
                     )
                 }
             }
+            if (automation && io.github.mangi.eta.agent.runtime.AgentAutomationToolPolicy.requiresVirtualDisplay(toolCall.name)) {
+                prepareAutomationDisplay()?.let { return@runCatching textResult(errorResult(it.code, it.message)) }
+            }
             when (toolCall.name) {
+                in io.github.mangi.eta.agent.automation.AgentTaskTools.names -> AgentModelClient.ToolResult(
+                    io.github.mangi.eta.agent.automation.AgentTaskTools(context).execute(toolCall.name, args),
+                    sensitive = true,
+                )
                 "get_current_context" -> textResult(DeviceContextTool.current(context))
                 "search_apps" -> textResult(searchApps(args))
                 "launch_app" -> {
@@ -278,7 +297,10 @@ internal class AgentLocalTools(
                 "set_clipboard" -> textResult(setClipboard(args))
                 "get_clipboard" -> textResult(getClipboard())
                 "paste_text" -> afterAction(pasteText(args))
-                "press_key" -> afterAction(deviceController.pressKey(args.optString("button"), currentActiveDisplayId()))
+                "press_key" -> afterAction(
+                    if (automation) pressAutomationKey(args)
+                    else deviceController.pressKey(args.optString("button"), currentActiveDisplayId()),
+                )
                 "wait" -> textResult(deviceController.waitMs(args.optInt("duration_ms", 1_000)))
                 "wait_for_text" -> textResult(waitForText(args))
                 "wait_for_package" -> textResult(waitForPackage(args))
@@ -339,6 +361,10 @@ internal class AgentLocalTools(
                 return JSONObject(errorResult("TOOL_DISABLED", "工具 $toolName 已在工具列表中关闭，本次未执行"))
             }
             deviceToolPermissionError(toolName)?.let { return JSONObject(it.content) }
+            if (automation) {
+                val rejection = io.github.mangi.eta.agent.runtime.AgentAutomationToolPolicy.foregroundRejection()
+                return JSONObject(errorResult(rejection.code, rejection.message))
+            }
             return when (val decision = beforeToolExecution(toolName)) {
                 ToolExecutionDecision.Allow -> {
                     publishedObservation.set(PublishedObservation())
@@ -436,6 +462,7 @@ internal class AgentLocalTools(
         }
         when (val result = AgentMemoryRepository.mutate(mutation)) {
             is AgentMemoryWriteResult.Success -> JSONObject()
+                .also { io.github.mangi.eta.agent.automation.AgentTaskScheduler.publish(context, "memory_updated", result.snapshot.revision) }
                 .put("ok", true)
                 .put("revision", result.snapshot.revision)
                 .put("bytes", result.snapshot.byteSize)
@@ -481,7 +508,45 @@ internal class AgentLocalTools(
         )
     }
 
+    private fun prepareAutomationDisplay(): ToolExecutionDecision.Reject? {
+        checkCancellation()
+        if (!virtualDisplayEnabled()) return ToolExecutionDecision.Reject(
+            "AUTOMATION_VIRTUAL_DISPLAY_DISABLED", "请先开启 Eta 虚拟屏；自动任务不会回退到主屏",
+        )
+        if (!rootAvailable()) return ToolExecutionDecision.Reject(
+            "AUTOMATION_ROOT_REQUIRED", "自动任务的后台 GUI 需要已授予 Root 权限；本次未操作主屏",
+        )
+        if (!CanvasRoutingPolicy.supportsBackgroundDisplay(android.os.Build.VERSION.SDK_INT)) return ToolExecutionDecision.Reject(
+            "AUTOMATION_DISPLAY_UNSUPPORTED", "后台 GUI 需要 Android 14 或以上版本",
+        )
+        val previous = automationDisplay.get()
+        if (previous != null) return if (previous.isValid()) null else ToolExecutionDecision.Reject(
+            "AUTOMATION_DISPLAY_LOST", "本次自动任务的虚拟屏已失效，请重新触发任务；不会切回主屏或重建后重放动作",
+        )
+        val acquired = VirtualDisplayController.acquireAutomationDisplay(context, rootAvailable)
+            ?: return ToolExecutionDecision.Reject(
+                "AUTOMATION_VIRTUAL_DISPLAY_UNAVAILABLE", "独立虚拟屏不可用或已被占用；本次未操作主屏，请检查 Root、系统兼容性或关闭已有虚拟屏",
+            )
+        if (!automationDisplay.compareAndSet(null, acquired)) acquired.close()
+        // Cancellation may have happened during the blocking Root bridge creation.
+        if (closed.get() || Thread.currentThread().isInterrupted) {
+            automationDisplay.getAndSet(null)?.close()
+            throw AgentRunCancelledException()
+        }
+        return if (automationDisplay.get()?.isValid() == true) null else ToolExecutionDecision.Reject(
+            "AUTOMATION_DISPLAY_LOST", "独立虚拟屏已失效；本次未操作主屏",
+        )
+    }
+
     private fun currentActiveDisplayId(): Int {
+        if (automation) {
+            val lease = automationDisplay.get()
+            if (!virtualDisplayEnabled() || !rootAvailable() || lease?.isValid() != true) {
+                publishedObservation.set(PublishedObservation())
+                throw ActiveDisplayUnavailableException()
+            }
+            return lease.displayId
+        }
         val id = activeDisplayId
         if (!CanvasRoutingPolicy.isVirtualDisplay(id)) return Display.DEFAULT_DISPLAY
         val vd = VirtualDisplayController.snapshots.value
@@ -491,6 +556,22 @@ internal class AgentLocalTools(
             publishedObservation.set(PublishedObservation())
             throw ActiveDisplayUnavailableException()
         }
+    }
+
+    private fun pressAutomationKey(args: JSONObject): String {
+        val keyCode = when (args.optString("button").uppercase(Locale.ROOT)) {
+            "BACK" -> 4
+            "ENTER" -> 66
+            "PASTE" -> 279
+            else -> return errorResult("AUTOMATION_FOREGROUND_UNAVAILABLE", "自动任务不允许系统全局按键")
+        }
+        val displayId = currentActiveDisplayId()
+        checkCancellation()
+        // Never fall through to Accessibility.globalAction if Root is revoked mid-run.
+        val result = rootCommandExecutor.execute("input -d $displayId keyevent $keyCode", timeoutMillis = 5_000L)
+        return if (result.ok) JSONObject().put("ok", true).put("tool", "press_key")
+            .put("display_id", displayId).toString()
+        else errorResult(result.errorCode.ifBlank { "AUTOMATION_KEY_FAILED" }, "虚拟屏按键失败；请重新观察，不要盲目重放动作")
     }
 
     private fun checkCancellation() {
@@ -929,7 +1010,9 @@ internal class AgentLocalTools(
         }
         launchIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_RESET_TASK_IF_NEEDED)
 
-        val mainForegroundPkg = AgentAccessibilityService.current()?.currentPackageName(Display.DEFAULT_DISPLAY)
+        val mainForegroundPkg = if (automation &&
+            context.getSystemService(android.os.PowerManager::class.java)?.isInteractive == false) null
+        else AgentAccessibilityService.current()?.currentPackageName(Display.DEFAULT_DISPLAY)
         val targetCanvas = CanvasRoutingPolicy.decideLaunchTarget(
             virtualDisplayEnabled = virtualDisplayEnabled(),
             backendAvailable = VirtualDisplayController.isBackendAvailable(rootAvailable(), lsposedAvailable()),
@@ -939,6 +1022,11 @@ internal class AgentLocalTools(
             ownPackage = context.packageName,
         )
 
+        if (automation && targetCanvas != CanvasRoutingPolicy.CanvasTarget.VIRTUAL_DISPLAY) {
+            return errorResult("AUTOMATION_FOREGROUND_UNAVAILABLE", "目标需要主屏或正在被用户使用；自动任务不会抢屏")
+        }
+        if (automation) currentActiveDisplayId()
+        val requestedAutomationLease = if (automation) automationDisplay.get() ?: throw ActiveDisplayUnavailableException() else null
         val launchedVirtualId = if (targetCanvas == CanvasRoutingPolicy.CanvasTarget.VIRTUAL_DISPLAY) {
             VirtualDisplayController.launchAppOnVirtualDisplay(
                 context = context,
@@ -947,6 +1035,7 @@ internal class AgentLocalTools(
                 launchIntent = launchIntent,
                 rootAvailable = rootAvailable,
                 checkCancellation = ::checkCancellation,
+                automationLease = requestedAutomationLease,
             )
         } else {
             null
@@ -956,6 +1045,7 @@ internal class AgentLocalTools(
             activeDisplayId = launchedVirtualId
             launchedVirtualId
         } else {
+            if (automation) return errorResult("AUTOMATION_VIRTUAL_LAUNCH_FAILED", "应用未能在独立虚拟屏启动；不会回退到主屏")
             checkCancellation()
             activeDisplayId = Display.DEFAULT_DISPLAY
             context.startActivity(launchIntent)
@@ -1043,7 +1133,9 @@ internal class AgentLocalTools(
             return errorResult("NO_ACTIVITY", "没有应用可以处理该 URI")
         }
         val resolvedPkg = context.packageManager.resolveActivity(intent, 0)?.activityInfo?.packageName
-        val mainForegroundPkg = AgentAccessibilityService.current()?.currentPackageName(Display.DEFAULT_DISPLAY)
+        val mainForegroundPkg = if (automation &&
+            context.getSystemService(android.os.PowerManager::class.java)?.isInteractive == false) null
+        else AgentAccessibilityService.current()?.currentPackageName(Display.DEFAULT_DISPLAY)
         val targetCanvas = CanvasRoutingPolicy.decideLaunchTarget(
             virtualDisplayEnabled = virtualDisplayEnabled(),
             backendAvailable = VirtualDisplayController.isBackendAvailable(rootAvailable(), lsposedAvailable()),
@@ -1052,6 +1144,11 @@ internal class AgentLocalTools(
             foregroundPackageOnMainDisplay = mainForegroundPkg,
             ownPackage = context.packageName,
         )
+        if (automation && (resolvedPkg.isNullOrBlank() || targetCanvas != CanvasRoutingPolicy.CanvasTarget.VIRTUAL_DISPLAY)) {
+            return errorResult("AUTOMATION_FOREGROUND_UNAVAILABLE", "链接未能解析到可在后台运行的应用；不会打开主屏选择器")
+        }
+        if (automation) currentActiveDisplayId()
+        val requestedAutomationLease = if (automation) automationDisplay.get() ?: throw ActiveDisplayUnavailableException() else null
         val virtualId = if (targetCanvas == CanvasRoutingPolicy.CanvasTarget.VIRTUAL_DISPLAY) {
             VirtualDisplayController.openUriOnVirtualDisplay(
                 context = context,
@@ -1059,6 +1156,7 @@ internal class AgentLocalTools(
                 targetLabel = uri.host ?: uri.scheme.orEmpty(),
                 rootAvailable = rootAvailable,
                 checkCancellation = ::checkCancellation,
+                automationLease = requestedAutomationLease,
             )
         } else {
             null
@@ -1067,6 +1165,7 @@ internal class AgentLocalTools(
             activeDisplayId = virtualId
             virtualId
         } else {
+            if (automation) return errorResult("AUTOMATION_VIRTUAL_LAUNCH_FAILED", "链接未能在独立虚拟屏打开；不会回退到主屏")
             checkCancellation()
             activeDisplayId = Display.DEFAULT_DISPLAY
             context.startActivity(intent)

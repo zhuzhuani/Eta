@@ -25,8 +25,10 @@ import androidx.room.migration.Migration
         McpServerEntity::class,
         CharacterEntity::class,
         UserPersonaEntity::class,
+        AgentTaskEntity::class,
+        AgentTaskRunEntity::class,
     ],
-    version = 25,
+    version = 26,
     exportSchema = false,
 )
 internal abstract class EtaDatabase : RoomDatabase() {
@@ -36,6 +38,7 @@ internal abstract class EtaDatabase : RoomDatabase() {
     abstract fun skillDao(): SkillDao
     abstract fun mcpServerDao(): McpServerDao
     abstract fun characterDao(): CharacterDao
+    abstract fun agentTaskDao(): AgentTaskDao
 
     companion object {
         @Volatile
@@ -68,6 +71,7 @@ internal abstract class EtaDatabase : RoomDatabase() {
                         MIGRATION_22_23,
                         MIGRATION_23_24,
                         MIGRATION_24_25,
+                        MIGRATION_25_26,
                     )
                     .addCallback(object : Callback() {
                         override fun onCreate(db: androidx.sqlite.db.SupportSQLiteDatabase) { createTextChunkCleanup(db) }
@@ -132,6 +136,12 @@ internal abstract class EtaDatabase : RoomDatabase() {
             database.execSQL("ALTER TABLE conversation_messages ADD COLUMN ttft_steps INTEGER")
             database.execSQL("ALTER TABLE conversation_messages ADD COLUMN decode_ms INTEGER")
             database.execSQL("ALTER TABLE conversation_messages ADD COLUMN decode_tokens INTEGER")
+        }
+
+        internal val MIGRATION_25_26 = Migration(25, 26) { database ->
+            database.execSQL("CREATE TABLE IF NOT EXISTS agent_tasks (id TEXT NOT NULL, name TEXT NOT NULL, prompt TEXT NOT NULL, triggerJson TEXT NOT NULL, enabled INTEGER NOT NULL, nextRunAt INTEGER, cooldownSeconds INTEGER NOT NULL, maxRuns INTEGER NOT NULL, runCount INTEGER NOT NULL, lastStartedAt INTEGER, lastStatus TEXT NOT NULL, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, PRIMARY KEY(id))")
+            database.execSQL("CREATE TABLE IF NOT EXISTS agent_task_runs (id TEXT NOT NULL, taskId TEXT NOT NULL, fireKey TEXT NOT NULL, status TEXT NOT NULL, eventJson TEXT NOT NULL, queuedAt INTEGER NOT NULL, startedAt INTEGER, finishedAt INTEGER, resultPreview TEXT NOT NULL, cancelRequested INTEGER NOT NULL, PRIMARY KEY(id))")
+            database.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_agent_task_runs_taskId_fireKey ON agent_task_runs(taskId, fireKey)")
         }
 
         private fun createTextChunkCleanup(database: androidx.sqlite.db.SupportSQLiteDatabase) {

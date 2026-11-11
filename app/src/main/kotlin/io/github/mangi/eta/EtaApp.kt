@@ -61,6 +61,14 @@ class EtaApp : Application(), XposedServiceHelper.OnServiceListener {
         AgentMemoryRepository.init(this)
         ProviderRepository.init(this)
         McpServerRepository.init(this)
+        applicationScope.launch {
+            runCatching {
+                io.github.mangi.eta.agent.automation.AgentTaskScheduler.enqueueDue(this@EtaApp)
+                io.github.mangi.eta.agent.automation.AgentTaskScheduler.refresh(this@EtaApp)
+            }.onFailure { throwable ->
+                AndroidAgentLogger.warn("Automation startup unavailable: type=${throwable.safeLogType()}")
+            }
+        }
         XposedServiceHelper.registerListener(this)
         applicationScope.launch {
             try {

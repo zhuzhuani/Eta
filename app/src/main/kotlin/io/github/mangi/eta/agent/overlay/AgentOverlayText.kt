@@ -114,5 +114,13 @@ internal fun toolDisplayNameResource(name: String): Int? = when (name) {
     "set_device_state" -> R.string.tool_set_device_state
     "app_state_control" -> R.string.tool_app_state_control
     "get_logcat" -> R.string.tool_get_logcat
+    "tasks_triggers" -> R.string.automation_tool_triggers
+    "tasks_list" -> R.string.automation_tool_list
+    "tasks_create" -> R.string.automation_tool_create
+    "tasks_update" -> R.string.automation_tool_update
+    "tasks_delete" -> R.string.automation_tool_delete
+    "tasks_run" -> R.string.automation_tool_run
+    "tasks_cancel" -> R.string.automation_tool_cancel
+    "tasks_history" -> R.string.automation_tool_history
     else -> null
 }

@@ -73,6 +73,25 @@ class LocaleResourcesTest {
         }
     }
 
+    @Test
+    fun scheduledTaskUiResourcesAreLocalizedInAllSupportedLocales() {
+        assertEquals("Scheduled tasks", localizedString("en-US", R.string.automation_title))
+        assertEquals("自动任务", localizedString("zh-CN", R.string.automation_title))
+        assertEquals("自動任務", localizedString("zh-TW", R.string.automation_title))
+        assertEquals("Run now", localizedString("en-US", R.string.automation_run))
+        assertEquals("立即运行", localizedString("zh-CN", R.string.automation_run))
+        assertEquals("立即運行", localizedString("zh-TW", R.string.automation_run))
+        assertEquals("Triggers", localizedString("en-US", R.string.automation_triggers_title))
+        assertEquals("触发器", localizedString("zh-CN", R.string.automation_triggers_title))
+        assertEquals("觸發器", localizedString("zh-TW", R.string.automation_triggers_title))
+        assertEquals("Available task triggers", localizedString("en-US", R.string.automation_tool_triggers))
+        assertEquals("查看可用触发器", localizedString("zh-CN", R.string.automation_tool_triggers))
+        assertEquals("查看可用觸發器", localizedString("zh-TW", R.string.automation_tool_triggers))
+        assertEquals("Monitoring task triggers", localizedString("en-US", R.string.automation_monitor_title))
+        assertEquals("正在监控任务触发器", localizedString("zh-CN", R.string.automation_monitor_title))
+        assertEquals("正在監控任務觸發器", localizedString("zh-TW", R.string.automation_monitor_title))
+    }
+
     @Suppress("DEPRECATION")
     private fun localizedString(languageTag: String, resourceId: Int): String {
         val resources = context.resources

@@ -57,6 +57,9 @@ internal object CanvasRoutingPolicy {
             FLAG_OWN_FOCUS or
             FLAG_STEAL_TOP_FOCUS_DISABLED
 
+    /** Automated runs must be destroyed on removal rather than migrated to the user's physical display. */
+    const val AUTOMATION_FLAGS: Int = TRUSTED_INTERACTIVE_FLAGS or FLAG_DESTROY_CONTENT_ON_REMOVAL
+
     // Android 13 尚无独立焦点与禁止抢占顶层焦点的组合能力，后台画布从 Android 14 起启用。
     fun supportsBackgroundDisplay(sdkInt: Int): Boolean = sdkInt >= 34
 

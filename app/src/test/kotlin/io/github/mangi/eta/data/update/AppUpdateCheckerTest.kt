@@ -1,10 +1,19 @@
 package io.github.mangi.eta.data.update
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class AppUpdateCheckerTest {
+
+    @Test
+    fun releaseSourceBelongsToFork() {
+        assertEquals(
+            "https://api.github.com/repos/zhuzhuani/Eta/releases/latest",
+            AppUpdateChecker.LATEST_RELEASE_URL,
+        )
+    }
 
     @Test
     fun newerPatchVersionIsNewer() {

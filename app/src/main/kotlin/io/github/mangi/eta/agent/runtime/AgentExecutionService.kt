@@ -1,5 +1,7 @@
 package io.github.mangi.eta.agent.runtime
 
+import io.github.mangi.eta.BuildConfig
+
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -135,7 +137,7 @@ internal class AgentExecutionService : Service() {
     companion object {
         private const val CHANNEL = "eta_execution"
         private const val NOTIFICATION_ID = 1107
-        private const val ACTION_STOP = "io.github.mangi.eta.action.STOP_USER_EXECUTION"
+        private const val ACTION_STOP = "${BuildConfig.APPLICATION_ID}.action.STOP_USER_EXECUTION"
         private val leases = ExecutionLeaseRegistry()
         private val ownerSequence = AtomicLong()
         private val mainHandler = Handler(Looper.getMainLooper())

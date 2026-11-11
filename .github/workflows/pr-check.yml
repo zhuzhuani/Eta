@@ -1,9 +1,6 @@
 name: PR Check
 
 on:
-  push:
-    branches:
-      - feature/scheduled-tasks
   pull_request:
     branches:
       - main

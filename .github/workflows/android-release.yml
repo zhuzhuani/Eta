@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - feature/scheduled-tasks
     tags:
       - "v*"
   workflow_dispatch:
@@ -49,12 +50,20 @@ jobs:
 
   build-apks:
     name: 构建 Debug 与 Release APK
+    # 签名任务仅运行仓库维护者控制的发布分支/标签；不要对不受信任的 PR 暴露私钥。
+    if: >-
+      github.repository == 'zhuzhuani/Eta' &&
+      (github.ref == 'refs/heads/main' ||
+       github.ref == 'refs/heads/feature/scheduled-tasks' ||
+       startsWith(github.ref, 'refs/tags/v'))
     runs-on: ubuntu-latest
     timeout-minutes: 40
 
     steps:
       - name: 检出代码
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          persist-credentials: false
 
       - name: 配置构建环境
         uses: ./.github/actions/setup-build
@@ -66,6 +75,7 @@ jobs:
           ETA_RELEASE_KEY_ALIAS: ${{ secrets.ETA_RELEASE_KEY_ALIAS }}
           ETA_RELEASE_KEY_PASSWORD: ${{ secrets.ETA_RELEASE_KEY_PASSWORD }}
         run: |
+          umask 077
           if [[ -z "$ETA_RELEASE_KEYSTORE_BASE64" ||
                 -z "$ETA_RELEASE_STORE_PASSWORD" ||
                 -z "$ETA_RELEASE_KEY_ALIAS" ||
@@ -116,6 +126,26 @@ jobs:
           fi
 
           "$apksigner_path" verify "${release_apks[0]}"
+          certificate_sha256="$("$apksigner_path" verify --print-certs "${release_apks[0]}" \
+            | sed -n 's/^Signer #1 certificate SHA-256 digest: //p')"
+          expected_sha256="$(tr -d '[:space:]' < .github/release-signing.sha256)"
+          if [[ ! "$expected_sha256" =~ ^[0-9a-f]{64}$ || "$certificate_sha256" != "$expected_sha256" ]]; then
+            echo "::error::Release APK 签名与固定证书不符，拒绝发布不能覆盖更新的 APK。"
+            exit 1
+          fi
+          package_name="$("${apksigner_path%/*}/aapt2" dump packagename "${release_apks[0]}")"
+          if [[ "$package_name" != "io.github.zhuzhuaini.eta" ]]; then
+            echo "::error::Release APK 包名不符，必须与官方 Eta 使用不同包名。"
+            exit 1
+          fi
+          version_code="$(jq -r '.elements[0].versionCode' app/build/outputs/apk/release/output-metadata.json)"
+          {
+            echo '### 固定签名 Release APK'
+            echo "- 安装包名：\`$package_name\`（可与官方 Eta 共存）"
+            echo "- versionCode：\`$version_code\`"
+            echo "- 证书 SHA-256：\`$certificate_sha256\`"
+            echo '- 日常安装和覆盖更新请下载不含 -debug 的 Release APK。Debug 签名不同，不用于覆盖更新。'
+          } >> "$GITHUB_STEP_SUMMARY"
 
           # 发版标签必须与 versionName 一致，避免标签与安装包版本错位
           if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then

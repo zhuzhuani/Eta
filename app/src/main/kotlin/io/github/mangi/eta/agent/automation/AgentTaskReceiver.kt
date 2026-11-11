@@ -1,5 +1,7 @@
 package io.github.mangi.eta.agent.automation
 
+import io.github.mangi.eta.BuildConfig
+
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -31,7 +33,7 @@ internal class AgentTaskReceiver : BroadcastReceiver() {
     }
 
     companion object {
-        const val ACTION_TICK = "io.github.mangi.eta.action.AUTOMATION_TICK"
+        const val ACTION_TICK = "${BuildConfig.APPLICATION_ID}.action.AUTOMATION_TICK"
         private val worker = Executors.newSingleThreadExecutor { runnable ->
             Thread(
                 runnable,

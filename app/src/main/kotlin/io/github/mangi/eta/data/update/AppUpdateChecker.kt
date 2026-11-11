@@ -21,13 +21,15 @@ internal data class AppLatestRelease(
  */
 internal object AppUpdateChecker {
 
-    fun fetchLatest(): AppLatestRelease {
+    fun fetchLatest(): AppLatestRelease? {
         val request = Request.Builder()
             .url(LATEST_RELEASE_URL)
             .header("Accept", "application/vnd.github+json")
             .header("User-Agent", USER_AGENT)
             .build()
         client.newCall(request).execute().use { response ->
+            // GitHub returns 404 when this fork has not published a release yet.
+            if (response.code == 404) return null
             if (!response.isSuccessful) {
                 throw IOException("GitHub Release 请求失败（HTTP ${response.code}）")
             }
@@ -66,6 +68,6 @@ internal object AppUpdateChecker {
         .readTimeout(8, TimeUnit.SECONDS)
         .build()
 
-    private const val LATEST_RELEASE_URL = "https://api.github.com/repos/Mangi-11/Eta/releases/latest"
+    internal const val LATEST_RELEASE_URL = "https://api.github.com/repos/zhuzhuani/Eta/releases/latest"
     private const val USER_AGENT = "Eta-Update-Checker"
 }

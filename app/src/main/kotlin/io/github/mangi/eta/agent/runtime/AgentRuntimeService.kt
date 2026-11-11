@@ -1,5 +1,7 @@
 package io.github.mangi.eta.agent.runtime
 
+import io.github.mangi.eta.BuildConfig
+
 import java.util.concurrent.Executors
 import java.util.concurrent.RejectedExecutionException
 import android.app.Service
@@ -1534,7 +1536,7 @@ internal class AgentRuntimeService : Service(), LifecycleOwner, SavedStateRegist
             instance.mainHandler.post { instance.handleEtaUiVisibilityChanged() }
         }
 
-        private const val ACTION_KEEP_ALIVE = "io.github.mangi.eta.agent.runtime.KEEP_ALIVE"
+        private const val ACTION_KEEP_ALIVE = "${BuildConfig.APPLICATION_ID}.agent.runtime.KEEP_ALIVE"
         private const val HIDE_DELAY_MS = 2_500L
         private const val RESULT_REVIEW_DELAY_MS = 120_000L
         private const val RESULT_CARD_HEIGHT_RATIO = 0.5f

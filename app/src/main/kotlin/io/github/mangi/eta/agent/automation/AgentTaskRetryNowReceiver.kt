@@ -1,5 +1,7 @@
 package io.github.mangi.eta.agent.automation
 
+import io.github.mangi.eta.BuildConfig
+
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
@@ -17,6 +19,6 @@ internal class AgentTaskRetryNowReceiver : BroadcastReceiver() {
     }
 
     companion object {
-        const val ACTION_RETRY_NOW = "io.github.mangi.eta.action.RETRY_NOW"
+        const val ACTION_RETRY_NOW = "${BuildConfig.APPLICATION_ID}.action.RETRY_NOW"
     }
 }

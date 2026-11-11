@@ -38,10 +38,10 @@
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
 
     <permission
-        android:name="io.github.mangi.eta.permission.CONTROL_ACCESSIBILITY_PROTECTION"
+        android:name="${applicationId}.permission.CONTROL_ACCESSIBILITY_PROTECTION"
         android:protectionLevel="signature" />
 
-    <uses-permission android:name="io.github.mangi.eta.permission.CONTROL_ACCESSIBILITY_PROTECTION" />
+    <uses-permission android:name="${applicationId}.permission.CONTROL_ACCESSIBILITY_PROTECTION" />
 
     <queries>
         <package android:name="com.google.android.googlequicksearchbox" />
@@ -214,7 +214,7 @@
 
         <provider
             android:name=".agent.accessibility.AgentAccessibilityHealthProvider"
-            android:authorities="io.github.mangi.eta.accessibility.health"
+            android:authorities="${applicationId}.accessibility.health"
             android:exported="true"
             android:grantUriPermissions="false"
             android:permission="android.permission.MANAGE_ACCESSIBILITY" />

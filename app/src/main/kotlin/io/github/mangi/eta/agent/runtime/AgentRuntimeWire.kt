@@ -1,5 +1,6 @@
 package io.github.mangi.eta.agent.runtime
 
+import io.github.mangi.eta.BuildConfig
 import io.github.mangi.eta.agent.model.AgentContextSnapshot
 import io.github.mangi.eta.agent.model.AssistantScreenContextProjection
 
@@ -11,6 +12,7 @@ import android.os.ParcelFileDescriptor
 import io.github.mangi.eta.agent.model.AgentConversationCodec
 import io.github.mangi.eta.agent.model.AgentModelClient
 import io.github.mangi.eta.config.Prefs
+import io.github.mangi.eta.core.ModuleConfig
 import io.github.mangi.eta.data.model.CustomBody
 import io.github.mangi.eta.data.model.CustomHeader
 import io.github.mangi.eta.data.model.ModelReasoningCapabilities
@@ -45,7 +47,7 @@ internal object AgentRuntimeWire {
     )
 
     /** bind 获取服务端 Messenger 的 Intent action。 */
-    const val ACTION_BIND = "io.github.mangi.eta.agent.runtime.BIND"
+    const val ACTION_BIND = "${BuildConfig.APPLICATION_ID}.agent.runtime.BIND"
 
     // Messenger.what
     /** client -> service：开始一次 Agent 运行，[Message.replyTo] 携带 client Messenger。 */
@@ -90,7 +92,6 @@ internal object AgentRuntimeWire {
     /** service -> client：返回各运行的会话归属与当前阶段。 */
     const val MSG_QUERY_ACTIVE_RUNS_RESPONSE = 17
 
-    private const val MODULE_PACKAGE = "io.github.mangi.eta"
     private const val SERVICE_CLASS = "io.github.mangi.eta.agent.runtime.AgentRuntimeService"
 
     private const val KEY_TYPE = "type"
@@ -268,7 +269,7 @@ internal object AgentRuntimeWire {
     )
 
     fun serviceIntent(): Intent =
-        Intent(ACTION_BIND).setComponent(ComponentName(MODULE_PACKAGE, SERVICE_CLASS))
+        Intent(ACTION_BIND).setComponent(ComponentName(ModuleConfig.ETA_PACKAGE, SERVICE_CLASS))
 
     private val json = Json {
         ignoreUnknownKeys = true

@@ -1,5 +1,6 @@
 package io.github.mangi.eta.ui.voice
 
+import io.github.mangi.eta.BuildConfig
 import android.Manifest
 import android.content.Context
 import android.content.Intent
@@ -88,7 +89,7 @@ import top.yukonga.miuix.kmp.squircle.squircleBorder
 import top.yukonga.miuix.kmp.squircle.squircleSurface
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
-internal const val ACTION_SPEECH_SETTINGS = "io.github.mangi.eta.OPEN_SPEECH_SETTINGS"
+internal const val ACTION_SPEECH_SETTINGS = "${BuildConfig.APPLICATION_ID}.OPEN_SPEECH_SETTINGS"
 
 internal fun openSpeechSettings(context: Context) {
     context.startActivity(

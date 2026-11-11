@@ -1,5 +1,7 @@
 package io.github.mangi.eta.agent.voice
 
+import io.github.mangi.eta.BuildConfig
+
 import io.github.mangi.eta.data.model.TtsProvider
 import io.github.mangi.eta.data.model.SpeechSettings
 import io.github.mangi.eta.data.repository.SpeechSettingsRepository
@@ -873,11 +875,11 @@ internal class EtaAssistantOverlayService : Service(), LifecycleOwner, SavedStat
     }
 
     internal companion object {
-        const val ACTION_SHOW = "io.github.mangi.eta.agent.voice.SHOW"
-        const val ACTION_OPEN_CONVERSATION = "io.github.mangi.eta.agent.voice.OPEN_CONVERSATION"
+        const val ACTION_SHOW = "${BuildConfig.APPLICATION_ID}.agent.voice.SHOW"
+        const val ACTION_OPEN_CONVERSATION = "${BuildConfig.APPLICATION_ID}.agent.voice.OPEN_CONVERSATION"
         const val EXTRA_CONVERSATION_KEY = "io.github.mangi.eta.agent.voice.extra.CONVERSATION_KEY"
         private const val EXTRA_SCREEN_CONTEXT_ID = "assistant_screen_context_id"
-        private const val ACTION_HANDOFF_READY = "io.github.mangi.eta.agent.voice.HANDOFF_READY"
+        private const val ACTION_HANDOFF_READY = "${BuildConfig.APPLICATION_ID}.agent.voice.HANDOFF_READY"
         private const val HANDOFF_TIMEOUT_MS = 5_000L
         private const val HANDOFF_EXIT_DURATION_MS = 220L
         private const val HANDOFF_REQUEST_CODE = 0x455441

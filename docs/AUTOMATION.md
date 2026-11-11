@@ -56,21 +56,23 @@
 
 - 官方 `Mangi-11/Eta`：`924eaa9d834f525d899f542bf8c3d73c40853b62`（2026-11-11 核对 `main` 最新提交），版本 3.4.2。
 - 功能来源 `Oo0520/Eta-por`：`58a1faec3cdc1a43bac55f2617729710429bd15f`，仅选择性移植任务相关代码，并适配官方现有 Runtime、数据库和 Miuix UI API。
-- 保留官方 JDK 25、SDK 37、Gradle 9.7.1 和已有版本/签名配置，不以旧 fork 全量覆盖官方代码。
+- 保留官方 JDK 25、SDK 37、Gradle 9.7.1 和版本号规则，不以旧 fork 全量覆盖官方代码。安装包名独立为 `io.github.zhuzhuaini.eta`，使用自己的固定 Release 签名；Kotlin namespace 和源码类名仍保留官方名称。
 
 ## 数据库与升级范围
 
-本次基于官方数据库版本 25 增加 `25 → 26` 迁移，不修改官方已有迁移链，不使用破坏性迁移。支持全新安装和官方 25 的升级。
+本次基于官方数据库版本 25 增加 `25 → 26` 迁移，不修改官方已有迁移链，不使用破坏性迁移。数据库层保留原有升级能力；但本分支安装包名为 `io.github.zhuzhuaini.eta`，首次安装使用独立数据目录，不覆盖或自动读取官方 Eta、旧 Etax 的应用数据。后续本分支固定签名的 Release APK 可原地更新。
 
 这不是整个 Eta-por 的合并：以官方虚拟屏为基础增加了自动任务专用的独占会话和有界息屏执行支持，未整体移植 fork 的虚拟屏增强、全局 Root 保活或自动备份。普通聊天与手动虚拟屏的默认行为保留。若旧 fork 的数据库版本高于 26，或包含额外表/迁移，**不要直接覆盖安装**：请先备份并确认单独的数据迁移方案。本次未验证旧 fork 数据库降级，也未宣称兼容。
 
 ## GitHub Actions 打包
 
-向自己的 fork `zhuzhuani/Eta` 推送 `feature/scheduled-tasks` 分支会自动触发 **PR Check**：执行 Lint、单元测试和 Debug 构建，成功后上传 `eta-scheduled-debug-<run_number>` APK artifact，不需要 Release 签名 Secrets。保留 `pull_request` 和 `workflow_dispatch` 入口；后续可在 Actions 页面查看构建，或对已有运行使用 Re-run jobs。
+向自己的 fork `zhuzhuani/Eta` 推送 `feature/scheduled-tasks` 分支会自动触发 **Eta Build**：并行进行 Lint/单元测试与 Debug/Release 构建。日常安装和覆盖更新必须下载**不含 `-debug` 的 Release APK**，Debug APK 使用另一套签名，不能作为 Release 的覆盖升级包。
 
-原有 **Eta Build** 发布流程保持不变，仍要求配置 Release 签名 Secrets。这里只构建 Debug APK，不自动合并到 `main`、覆盖 `etax-main` 或发布 Release。
+Release 使用仓库的四项 `ETA_RELEASE_*` Secrets，缺失时构建失败，不生成临时签名替代。每次构建检查 APK 包名为 `io.github.zhuzhuaini.eta`，并校验签名指纹与仓库固定记录一致；详细说明见 [固定签名与覆盖更新](RELEASE_SIGNING.md)。原来的 `ETAX_*` Secrets 不变。
 
-## 本次验证记录（2026-11-11）
+**PR Check** 保留给 Pull Request/手动校验，不读取发布签名。分支推送不会自动合并到 `main`、覆盖 `etax-main` 或发布 Release；现有标签流程仍只创建草稿。
+
+## GUI 扩展阶段验证记录（2026-11-11，安装包独立化之前）
 
 - 官方工具链执行 `bash ./gradlew :app:testDebugUnitTest :app:lintDebug --no-daemon --continue` 成功。
 - GUI 扩展后的最终源码共 2042 项单元测试：2041 通过、0 失败、1 跳过。跳过的是原有 `EtaWaveShaderTest.effectCompilesWithAndroidShaderCompiler`，本机 Robolectric 原生渲染器不支持 child shader，与任务功能无关。

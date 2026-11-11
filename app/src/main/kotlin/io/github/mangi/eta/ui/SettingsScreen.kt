@@ -222,14 +222,20 @@ private fun SettingsPageContent(
         if (!checkingUpdate) {
             checkingUpdate = true
             coroutineScope.launch {
-                val release = runCatching {
+                val result = runCatching {
                     withContext(Dispatchers.IO) { AppUpdateChecker.fetchLatest() }
-                }.getOrNull()
+                }
                 checkingUpdate = false
+                val release = result.getOrNull()
                 when {
-                    release == null -> Toast.makeText(
+                    result.isFailure -> Toast.makeText(
                         context.applicationContext,
                         context.getString(R.string.ui_update_check_failed),
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                    release == null -> Toast.makeText(
+                        context.applicationContext,
+                        context.getString(R.string.ui_update_already_latest),
                         Toast.LENGTH_SHORT,
                     ).show()
                     AppUpdateChecker.isNewer(release.version, appVersionName) -> availableUpdate = release

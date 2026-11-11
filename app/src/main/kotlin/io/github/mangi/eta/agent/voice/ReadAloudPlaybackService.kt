@@ -1,5 +1,7 @@
 package io.github.mangi.eta.agent.voice
 
+import io.github.mangi.eta.BuildConfig
+
 import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
@@ -63,7 +65,7 @@ internal class ReadAloudPlaybackService : Service() {
     }
 
     companion object {
-        private const val ACTION_STOP = "io.github.mangi.eta.action.STOP_READ_ALOUD"
+        private const val ACTION_STOP = "${BuildConfig.APPLICATION_ID}.action.STOP_READ_ALOUD"
         private const val CHANNEL = "eta_read_aloud"
         private const val NOTIFICATION_ID = 4204
 

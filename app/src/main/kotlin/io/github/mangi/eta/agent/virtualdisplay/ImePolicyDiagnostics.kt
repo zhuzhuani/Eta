@@ -3,6 +3,7 @@ package io.github.mangi.eta.agent.virtualdisplay
 /** Reflection seam for the display-specific IME isolation policy. */
 internal interface ImePolicyAccess {
     fun getWindowManagerService(): Any?
+    fun getWindowManagerServiceFallback(): Any?
     fun findSetDisplayImePolicy(service: Any): ((displayId: Int, policy: Int) -> Unit)?
     fun findGetDisplayImePolicy(service: Any): ((displayId: Int) -> Int?)?
 }
@@ -19,11 +20,24 @@ internal fun applyImePolicyHide(
         return false
     }
 
-    val service = try {
+    var primaryError: Throwable? = null
+    val primaryService = try {
         access.getWindowManagerService()
     } catch (error: Throwable) {
-        return fail(AutomationDisplayFailureDetail.Branch.IME_SERVICE_LOOKUP, error)
-    } ?: return fail(AutomationDisplayFailureDetail.Branch.IME_SERVICE_LOOKUP)
+        primaryError = error
+        null
+    }
+    val fallbackService = if (primaryService == null) {
+        try {
+            access.getWindowManagerServiceFallback()
+        } catch (error: Throwable) {
+            return fail(AutomationDisplayFailureDetail.Branch.IME_SERVICE_LOOKUP, error)
+        }
+    } else {
+        null
+    }
+    val service = primaryService ?: fallbackService
+        ?: return fail(AutomationDisplayFailureDetail.Branch.IME_SERVICE_LOOKUP, primaryError)
 
     val setter = try {
         access.findSetDisplayImePolicy(service)
@@ -59,6 +73,14 @@ internal class ReflectiveImePolicyAccess : ImePolicyAccess {
     override fun getWindowManagerService(): Any? {
         val global = Class.forName("android.view.WindowManagerGlobal")
         return global.getMethod("getWindowManagerService").invoke(null)
+    }
+
+    override fun getWindowManagerServiceFallback(): Any? {
+        val serviceManager = Class.forName("android.os.ServiceManager")
+        val binder = serviceManager.getMethod("getService", String::class.java).invoke(null, "window")
+            ?: return null
+        val stub = Class.forName("android.view.IWindowManager\$Stub")
+        return stub.getMethod("asInterface", Class.forName("android.os.IBinder")).invoke(null, binder)
     }
 
     override fun findSetDisplayImePolicy(service: Any): ((displayId: Int, policy: Int) -> Unit)? {

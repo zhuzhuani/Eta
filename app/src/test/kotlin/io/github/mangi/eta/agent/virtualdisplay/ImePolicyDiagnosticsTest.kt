@@ -58,6 +58,62 @@ class ImePolicyDiagnosticsTest {
     }
 
     @Test
+    fun serviceLookupUsesPrimaryWhenAvailableAndFallsBackAfterPrimaryFailure() {
+        var fallbackCalls = 0
+        val primaryService = Any()
+        val preferred = object : ImePolicyAccess {
+            override fun getWindowManagerService(): Any = primaryService
+            override fun getWindowManagerServiceFallback(): Any? {
+                fallbackCalls++
+                return Any()
+            }
+            override fun findSetDisplayImePolicy(service: Any) = { _: Int, _: Int -> }
+            override fun findGetDisplayImePolicy(service: Any) = { _: Int -> 1 }
+        }
+        assertTrue(applyImePolicyHide(preferred, 12, 1) { _, _ -> })
+        assertEquals(0, fallbackCalls)
+
+        val fallbackService = Any()
+        val recovering = object : ImePolicyAccess {
+            override fun getWindowManagerService(): Any? = throw IllegalStateException("primary unavailable")
+            override fun getWindowManagerServiceFallback(): Any = fallbackService
+            override fun findSetDisplayImePolicy(service: Any) = { _: Int, _: Int -> }
+            override fun findGetDisplayImePolicy(service: Any) = { _: Int -> 1 }
+        }
+        assertTrue(applyImePolicyHide(recovering, 12, 1) { _, _ -> })
+
+        val nullPrimary = object : ImePolicyAccess {
+            override fun getWindowManagerService(): Any? = null
+            override fun getWindowManagerServiceFallback(): Any = fallbackService
+            override fun findSetDisplayImePolicy(service: Any) = { _: Int, _: Int -> }
+            override fun findGetDisplayImePolicy(service: Any) = { _: Int -> 1 }
+        }
+        assertTrue(applyImePolicyHide(nullPrimary, 12, 1) { _, _ -> })
+    }
+
+    @Test
+    fun emptyFallbackPreservesPrimaryInvocationTargetExceptionForDiagnostics() {
+        val originalCause = IllegalStateException("primary cause")
+        val primaryError = InvocationTargetException(originalCause)
+        var reported: Throwable? = null
+        var reportedBranch: AutomationDisplayFailureDetail.Branch? = null
+        val access = object : ImePolicyAccess {
+            override fun getWindowManagerService(): Any? = throw primaryError
+            override fun getWindowManagerServiceFallback(): Any? = null
+            override fun findSetDisplayImePolicy(service: Any) = null
+            override fun findGetDisplayImePolicy(service: Any) = null
+        }
+
+        assertFalse(applyImePolicyHide(access, 12, 1) { branch, error ->
+            reportedBranch = branch
+            reported = error
+        })
+        assertEquals(AutomationDisplayFailureDetail.Branch.IME_SERVICE_LOOKUP, reportedBranch)
+        assertTrue(reported === primaryError)
+        assertTrue(reported?.cause === originalCause)
+    }
+
+    @Test
     fun setterInvocationRetainsOnlyFiniteInvocationAndCauseKinds() {
         var observed: AutomationDisplayFailureDetail.Branch? = null
         var exceptionKind: AutomationDisplayFailureDetail.ExceptionKind? = null
@@ -123,6 +179,13 @@ class ImePolicyDiagnosticsTest {
                 throw IllegalStateException("private exception text")
             }
             return service
+        }
+
+        override fun getWindowManagerServiceFallback(): Any? {
+            if (failurePoint == FailurePoint.SERVICE_LOOKUP) {
+                throw IllegalStateException("fallback exception text")
+            }
+            return null
         }
 
         override fun findSetDisplayImePolicy(service: Any): ((displayId: Int, policy: Int) -> Unit)? {

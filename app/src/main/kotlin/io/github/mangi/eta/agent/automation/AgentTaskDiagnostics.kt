@@ -1,6 +1,10 @@
 package io.github.mangi.eta.agent.automation
 
+import android.app.KeyguardManager
 import android.content.Context
+import android.content.SharedPreferences
+import android.os.Looper
+import android.os.PowerManager
 import android.util.AtomicFile
 import io.github.mangi.eta.BuildConfig
 import io.github.mangi.eta.agent.accessibility.AgentAccessibilityService
@@ -10,6 +14,7 @@ import io.github.mangi.eta.agent.tool.AgentToolRequirements
 import io.github.mangi.eta.data.db.AgentTaskEntity
 import io.github.mangi.eta.data.db.AgentTaskRunEntity
 import io.github.mangi.eta.data.db.EtaDatabase
+import io.github.mangi.eta.agent.virtualdisplay.AutomationDisplayFailureDetail
 import io.github.mangi.eta.agent.virtualdisplay.VirtualDisplayController
 import java.io.BufferedOutputStream
 import java.io.ByteArrayOutputStream
@@ -35,7 +40,7 @@ import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import org.json.JSONObject
 
-/** Best-effort, content-free automation diagnostics. Never let logging failures affect a run. */
+/** Best-effort scheduled-task diagnostics. Safe records stay content-free; full capture is separately opt-in/export-gated. */
 internal object AgentTaskDiagnostics {
     internal const val SCHEMA_VERSION = 1
     internal const val MAX_EVENTS_PER_TASK = 120
@@ -112,43 +117,47 @@ internal object AgentTaskDiagnostics {
 
     /** Bounded writes run off the automation thread; rejection is safe because coverage is best-effort. */
     private fun record(context: Context, taskId: String, event: JSONObject) {
-        if (taskId.isBlank()) return
-        val appContext = context.applicationContext
-        val key = hashIdentifier(taskId)
-        try {
-            writes.execute {
-                runCatching {
-                    synchronized(stateLock) {
-                        persist(appContext, key, event)
+        runCatching {
+            if (taskId.isBlank()) return@runCatching
+            val appContext = context.applicationContext
+            val key = hashIdentifier(taskId)
+            try {
+                writes.execute {
+                    runCatching {
+                        synchronized(stateLock) {
+                            persist(appContext, key, event)
+                        }
                     }
                 }
+            } catch (_: RejectedExecutionException) {
+                // This event is intentionally dropped rather than delaying the task. Export always states
+                // that records are best-effort and that missing events do not imply no event occurred.
+            } catch (_: RuntimeException) {
+                // A broken diagnostics executor must never affect task execution.
             }
-        } catch (_: RejectedExecutionException) {
-            // This event is intentionally dropped rather than delaying the task. Export always states
-            // that records are best-effort and that missing events do not imply no event occurred.
-        } catch (_: RuntimeException) {
-            // A broken diagnostics executor must never affect task execution.
         }
     }
 
     private fun recordForRun(context: Context, runId: String, event: JSONObject) {
-        if (runId.isBlank()) return
-        val appContext = context.applicationContext
-        try {
-            writes.execute {
-                runCatching {
-                    val taskId = runBlocking(Dispatchers.IO) {
-                        EtaDatabase.get(appContext).agentTaskDao().run(runId)?.taskId
-                    } ?: return@execute
-                    synchronized(stateLock) {
-                        persist(appContext, hashIdentifier(taskId), event)
+        runCatching {
+            if (runId.isBlank()) return@runCatching
+            val appContext = context.applicationContext
+            try {
+                writes.execute {
+                    runCatching {
+                        val taskId = runBlocking(Dispatchers.IO) {
+                            EtaDatabase.get(appContext).agentTaskDao().run(runId)?.taskId
+                        } ?: return@execute
+                        synchronized(stateLock) {
+                            persist(appContext, hashIdentifier(taskId), event)
+                        }
                     }
                 }
+            } catch (_: RejectedExecutionException) {
+                // Diagnostics are best-effort; a full queue drops this record instead of delaying a run.
+            } catch (_: RuntimeException) {
+                // Lookup and persistence failures are intentionally isolated from runtime execution.
             }
-        } catch (_: RejectedExecutionException) {
-            // Diagnostics are best-effort; a full queue drops this record instead of delaying a run.
-        } catch (_: RuntimeException) {
-            // Lookup and persistence failures are intentionally isolated from runtime execution.
         }
     }
 
@@ -281,6 +290,99 @@ internal object AgentTaskDiagnostics {
         record(context, taskId, item)
     }
 
+    fun isFullCaptureEnabled(context: Context, taskId: String): Boolean =
+        AgentTaskFullCapture.isEnabled(context, taskId)
+
+    fun setFullCaptureEnabled(context: Context, taskId: String, enabled: Boolean): Boolean =
+        AgentTaskFullCapture.setEnabled(context, taskId, enabled)
+
+    fun registerFullCaptureRun(context: Context, taskId: String, runId: String) {
+        runCatching { AgentTaskFullCapture.registerRun(context, taskId, runId) }
+    }
+
+    fun unregisterFullCaptureRun(runId: String) {
+        runCatching { AgentTaskFullCapture.unregisterRun(runId) }
+    }
+
+    fun recordFullRunContext(
+        context: Context,
+        taskId: String,
+        runId: String,
+        taskName: String,
+        taskPrompt: String,
+        runtimePrompt: String,
+        model: String,
+        modelParameters: JSONObject,
+    ) = AgentTaskFullCapture.recordRunContext(
+        context, taskId, runId, taskName, taskPrompt, runtimePrompt, model, modelParameters,
+    )
+
+    fun recordFullToolCall(
+        context: Context, runId: String, callId: String, toolName: String, round: Int, argumentsJson: String,
+    ) = AgentTaskFullCapture.recordToolCallForRun(context, runId, callId, toolName, round, argumentsJson)
+
+    fun recordFullToolResult(
+        context: Context,
+        runId: String,
+        callId: String,
+        toolName: String,
+        result: String,
+        sensitive: Boolean,
+        command: String?,
+        images: JSONArray,
+    ) = AgentTaskFullCapture.recordToolResultForRun(
+        context, runId, callId, toolName, result, sensitive, command, images,
+    )
+
+    fun recordFullToolException(
+        context: Context, runId: String, callId: String, toolName: String, error: Throwable,
+    ) = AgentTaskFullCapture.recordToolExceptionForRun(context, runId, callId, toolName, error)
+
+    fun recordFullResponse(context: Context, runId: String, response: String) =
+        AgentTaskFullCapture.recordRunResponseForRun(context, runId, response)
+
+    fun recordFullFailure(context: Context, runId: String, error: Throwable, cancelled: Boolean) =
+        AgentTaskFullCapture.recordRunFailureForRun(context, runId, error, cancelled)
+
+    fun recordDeviceState(context: Context, taskId: String, runId: String) {
+        runCatching {
+            val power = context.getSystemService(PowerManager::class.java)
+            val keyguard = context.getSystemService(KeyguardManager::class.java)
+            val state = JSONObject()
+                .put("isInteractive", runCatching { power?.isInteractive }.getOrNull() ?: JSONObject.NULL)
+                .put("isDeviceIdleMode", runCatching { power?.isDeviceIdleMode }.getOrNull() ?: JSONObject.NULL)
+                .put("isPowerSaveMode", runCatching { power?.isPowerSaveMode }.getOrNull() ?: JSONObject.NULL)
+                .put("keyguardLocked", runCatching { keyguard?.isKeyguardLocked }.getOrNull() ?: JSONObject.NULL)
+            if (android.os.Build.VERSION.SDK_INT >= 33) {
+                runCatching { power?.isLowPowerStandbyEnabled }.getOrNull()?.let { state.put("isLowPowerStandbyEnabled", it) }
+            }
+            runCatching {
+                val powerManager = context.getSystemService(PowerManager::class.java)
+                if (powerManager != null) state.put(
+                    "isIgnoringBatteryOptimizations",
+                    powerManager.isIgnoringBatteryOptimizations(context.packageName),
+                )
+            }
+            runCatching {
+                val manager = context.getSystemService(android.app.ActivityManager::class.java)
+                if (manager != null) state.put("backgroundRestricted", manager.isBackgroundRestricted)
+            }
+            val safe = event(Kind.CAPABILITY_SNAPSHOT)
+                .put("runKey", hashIdentifier(runId))
+                .put("rootStatus", safeRootStatus(RootAccess.state.value.status.name))
+                .put("accessibilityAvailable", AgentAccessibilityService.isAvailable())
+                .put("virtualDisplayActive", VirtualDisplayController.snapshots.value.active)
+            for (name in listOf(
+                "isInteractive", "isDeviceIdleMode", "isPowerSaveMode", "keyguardLocked",
+                "isLowPowerStandbyEnabled", "isIgnoringBatteryOptimizations", "backgroundRestricted",
+            )) {
+                state.opt(name)?.takeIf { it is Boolean }?.let { safe.put(name, it) }
+            }
+            record(context, taskId, safe)
+            AgentTaskFullCapture.recordDeviceState(context, taskId, runId, state)
+        }
+    }
+
     fun recordCapabilities(
         context: Context,
         taskId: String,
@@ -305,9 +407,54 @@ internal object AgentTaskDiagnostics {
     }
 
     fun recordDisplayFailureForRun(context: Context, runId: String, failure: DisplayFailure) {
-        recordForRun(context, runId, event(Kind.DISPLAY_FAILURE)
+        runCatching {
+            recordSafeDisplayFailureForRun(context, runId, failure)
+            AgentTaskFullCapture.recordDisplayFailureForRun(
+                context, runId, JSONObject().put("reason", failure.name),
+            )
+        }
+    }
+
+    fun recordDisplayFailureDetailForRun(
+        context: Context,
+        runId: String,
+        detail: AutomationDisplayFailureDetail,
+    ) {
+        runCatching {
+            val safeFailure = DisplayFailure.valueOf(detail.reason.name)
+            recordSafeDisplayFailureForRun(context, runId, safeFailure, detail)
+            val fullDetail = JSONObject()
+                .put("reason", detail.reason.name)
+                .put("stage", detail.stage.name)
+                .put("code", detail.code.name)
+                .put("exceptionKind", detail.exceptionKind?.name ?: JSONObject.NULL)
+                .put("causeKind", detail.causeKind?.name ?: JSONObject.NULL)
+                .put("sdkInt", detail.sdkInt ?: JSONObject.NULL)
+                .put("processUid", detail.processUid ?: JSONObject.NULL)
+                .put("branch", detail.branch?.name ?: JSONObject.NULL)
+            AgentTaskFullCapture.recordDisplayFailureForRun(context, runId, fullDetail)
+        }
+    }
+
+    private fun recordSafeDisplayFailureForRun(
+        context: Context,
+        runId: String,
+        failure: DisplayFailure,
+        detail: AutomationDisplayFailureDetail? = null,
+    ) {
+        val item = event(Kind.DISPLAY_FAILURE)
             .put("runKey", hashIdentifier(runId))
-            .put("reason", failure.name))
+            .put("reason", failure.name)
+        detail?.let {
+            item.put("stage", it.stage.name)
+                .put("code", it.code.name)
+                .put("exceptionKind", it.exceptionKind?.name ?: JSONObject.NULL)
+                .put("causeKind", it.causeKind?.name ?: JSONObject.NULL)
+                .put("sdkInt", it.sdkInt ?: JSONObject.NULL)
+                .put("processUid", it.processUid ?: JSONObject.NULL)
+                .put("branch", it.branch?.name ?: JSONObject.NULL)
+        }
+        recordForRun(context, runId, item)
     }
 
     enum class DisplayFailure {
@@ -518,9 +665,15 @@ internal object AgentTaskDiagnostics {
     }
 
     /** Export is intentionally suspendable: DB/file/ZIP work never runs on the UI thread. */
-    suspend fun export(context: Context, taskId: String, output: OutputStream) {
+    suspend fun export(
+        context: Context,
+        taskId: String,
+        output: OutputStream,
+        includeSensitive: Boolean = false,
+    ) {
         awaitPendingWrites()
         withContext(Dispatchers.IO) {
+            val fullSnapshot = AgentTaskFullCapture.snapshotForExport(context, taskId, includeSensitive)
             val appContext = context.applicationContext
             val dao = EtaDatabase.get(appContext).agentTaskDao()
             val task = dao.task(taskId) ?: throw IllegalArgumentException("Scheduled task not found")
@@ -538,15 +691,23 @@ internal object AgentTaskDiagnostics {
             val manifest = manifest(
                 appContext, taskKey, hasLog, projectedEvents.json.length(),
                 truncated || projectedEvents.omitted, hasMoreRuns,
+                includeSensitive, fullSnapshot,
             )
             val taskProjection = projectTask(task, taskKey)
             val runProjection = JSONArray(runs.asReversed().mapIndexed { index, run -> projectRun(run, index) })
-            writeZip(output, listOf(
+            val entries = mutableListOf(
                 "manifest.json" to manifest.toString(),
                 "task.json" to taskProjection.toString(),
                 "runs.json" to runProjection.toString(),
                 "events.json" to projectedEvents.json.toString(),
-            ))
+            )
+            fullSnapshot?.takeIf { it.status in setOf("included", "no_retained_log") }
+                ?.let { entries += "full_diagnostics.json" to it.json }
+            writeZip(
+                output,
+                entries,
+                if (fullSnapshot?.status == "included") AgentTaskFullCapture.MAX_EXPORT_BYTES else MAX_EXPORT_BYTES,
+            )
         }
     }
 
@@ -665,6 +826,7 @@ internal object AgentTaskDiagnostics {
                         continue
                     }
                     projected.put("type", type).put("reason", reason)
+                    omitted = addDisplayFailureMetadata(projected, raw) || omitted
                 }
                 else -> {
                     omitted = true
@@ -674,6 +836,28 @@ internal object AgentTaskDiagnostics {
             output.put(projected)
         }
         return ProjectedEventLog(output, omitted)
+    }
+
+    private fun addDisplayFailureMetadata(projected: JSONObject, raw: JSONObject): Boolean {
+        var omitted = false
+        val enumFields = listOf(
+            "stage" to AutomationDisplayFailureDetail.Stage.entries.map { it.name }.toSet(),
+            "code" to AutomationDisplayFailureDetail.Code.entries.map { it.name }.toSet(),
+            "exceptionKind" to AutomationDisplayFailureDetail.ExceptionKind.entries.map { it.name }.toSet(),
+            "causeKind" to AutomationDisplayFailureDetail.ExceptionKind.entries.map { it.name }.toSet(),
+            "branch" to AutomationDisplayFailureDetail.Branch.entries.map { it.name }.toSet(),
+        )
+        enumFields.forEach { (name, allowed) ->
+            if (!raw.has(name) || raw.isNull(name)) return@forEach
+            val value = raw.optString(name)
+            if (value in allowed) projected.put(name, value) else omitted = true
+        }
+        listOf("sdkInt" to (1..100), "processUid" to (0..2_000_000)).forEach { (name, range) ->
+            if (!raw.has(name) || raw.isNull(name)) return@forEach
+            val value = raw.optInt(name, Int.MIN_VALUE)
+            if (value in range) projected.put(name, value) else omitted = true
+        }
+        return omitted
     }
 
     private fun addRunCapabilities(projected: JSONObject, raw: JSONObject) {
@@ -744,6 +928,8 @@ internal object AgentTaskDiagnostics {
         eventCount: Int,
         truncated: Boolean,
         hasMoreRuns: Boolean,
+        fullCaptureRequested: Boolean,
+        fullSnapshot: AgentTaskFullCapture.ExportSnapshot?,
     ): JSONObject {
         val zone = runCatching { ZoneId.systemDefault().id }
             .getOrNull()?.takeIf { it in ZoneId.getAvailableZoneIds() || it == "UTC" } ?: "unknown"
@@ -766,6 +952,12 @@ internal object AgentTaskDiagnostics {
             })
             .put("eventCoverage", "best_effort_bounded; pre-installation events and evicted/missing logs are unavailable")
             .put("runHistoryTruncated", hasMoreRuns)
+            .put("fullCaptureRequested", fullCaptureRequested)
+            .put("fullCaptureStatus", fullSnapshot?.status ?: if (fullCaptureRequested) "unavailable" else "not_requested")
+            .put("fullCaptureIncluded", fullSnapshot?.status == "included" || fullSnapshot?.status == "no_retained_log")
+            .put("fullCaptureGeneration", fullSnapshot?.generation ?: JSONObject.NULL)
+            .put("fullCaptureSnapshotCannotBeRevoked", fullSnapshot?.status == "included")
+            .put("fullCaptureLimitation", "A capture toggle after the snapshot cannot retract an export already being written.")
             .put("omissionsPossible", true)
             .put("absenceMeansNoIssue", false)
             .put("limitations", JSONArray(listOf(
@@ -787,16 +979,20 @@ internal object AgentTaskDiagnostics {
         }
     }
 
-    private fun writeZip(output: OutputStream, entries: List<Pair<String, String>>) {
+    private fun writeZip(
+        output: OutputStream,
+        entries: List<Pair<String, String>>,
+        maxBytes: Int = MAX_EXPORT_BYTES,
+    ) {
         var written = 0L
         val bounded = object : FilterOutputStream(output) {
             override fun write(value: Int) {
-                if (++written > MAX_EXPORT_BYTES) throw IOException("Diagnostic export exceeds size limit")
+                if (++written > maxBytes) throw IOException("Diagnostic export exceeds size limit")
                 out.write(value)
             }
 
             override fun write(buffer: ByteArray, offset: Int, length: Int) {
-                if (length < 0 || written + length > MAX_EXPORT_BYTES) {
+                if (length < 0 || written + length > maxBytes) {
                     throw IOException("Diagnostic export exceeds size limit")
                 }
                 written += length

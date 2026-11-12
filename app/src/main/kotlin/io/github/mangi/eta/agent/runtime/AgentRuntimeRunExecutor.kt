@@ -2,6 +2,7 @@ package io.github.mangi.eta.agent.runtime
 
 import android.content.Context
 import io.github.mangi.eta.agent.accessibility.AgentAccessibilityKeeper
+import io.github.mangi.eta.agent.automation.AgentTaskDiagnostics
 import io.github.mangi.eta.agent.browser.BrowserSessionRegistry
 import io.github.mangi.eta.agent.model.AgentConversationCodec
 import io.github.mangi.eta.agent.model.AgentConversationToolCatalog
@@ -76,6 +77,25 @@ internal class AgentRuntimeRunExecutor(
         val runController = session.controller
         val automated = request.handoff?.source == "automation" ||
             io.github.mangi.eta.agent.automation.AgentTaskScheduler.isRegistered(request.runId)
+        fun observeAutomationTools(delegate: AgentModelClient.ToolExecutor): AgentModelClient.ToolExecutor =
+            if (!automated) delegate else AgentAutomationDiagnosticToolExecutor(
+                delegate = delegate,
+                onCall = { call ->
+                    AgentTaskDiagnostics.recordFullToolCall(
+                        appContext, request.runId, call.id, call.name, call.round, call.argumentsJson,
+                    )
+                },
+                onResult = { call, result ->
+                    AgentTaskDiagnostics.recordFullToolResult(
+                        appContext, request.runId, call.id, call.name, result.content,
+                        result.sensitive, result.command,
+                        AgentAutomationDiagnosticToolExecutor.imageMetadata(result.images),
+                    )
+                },
+                onFailure = { call, error ->
+                    AgentTaskDiagnostics.recordFullToolException(appContext, request.runId, call.id, call.name, error)
+                },
+            )
         var automationExecutionLease: AgentAutomationExecutionLease? = null
         val archivedEvents = AgentRunArchiveStore.createEventBuffer(request.handoff)
         var entrySurfaceGuard: EntrySurfaceGuard? = null
@@ -283,7 +303,7 @@ internal class AgentRuntimeRunExecutor(
                     AgentRuntimePolicy.constrain(rawSubagentConfig, currentPermissions())
                 },
                 capabilitiesProvider = { AgentToolCapabilities.capture(appContext) },
-                baseToolExecutor = routingExecutor,
+                baseToolExecutor = observeAutomationTools(routingExecutor),
                 skillContext = skillContext,
                 memoryContext = memoryContext,
                 mcpTools = mcpTools,
@@ -372,7 +392,7 @@ internal class AgentRuntimeRunExecutor(
                 capabilitiesProvider = { AgentToolCapabilities.capture(appContext) },
                 prompt = request.prompt,
                 assistantScreenContext = request.assistantScreenContext,
-                toolExecutor = runToolExecutor,
+                toolExecutor = observeAutomationTools(runToolExecutor),
                 images = request.images,
                 history = request.history,
                 runController = runController,
@@ -391,6 +411,9 @@ internal class AgentRuntimeRunExecutor(
                 )
             }
             response = completedResponse
+            if (automated) runCatching {
+                AgentTaskDiagnostics.recordFullResponse(appContext, request.runId, completedResponse.content)
+            }
             AgentRuntimeWire.RunResult(
                 runId = request.runId,
                 ok = true,
@@ -405,6 +428,9 @@ internal class AgentRuntimeRunExecutor(
             // 失败时历史是否完整落盘不确定，放弃固定的记忆快照；记忆未变时重新注入的内容逐字节相同。
             ConversationMemoryPins.forget(memoryConversationId)
             cancelled = runController.isCancelled || throwable is AgentRunCancelledException
+            if (automated) runCatching {
+                AgentTaskDiagnostics.recordFullFailure(appContext, request.runId, throwable, cancelled)
+            }
             val modelFailure = throwable as? AgentModelExecutionException
             val message = if (cancelled) {
                 "已停止"

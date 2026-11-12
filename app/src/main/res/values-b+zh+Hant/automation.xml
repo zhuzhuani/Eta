@@ -64,6 +64,15 @@
     <string name="automation_task_prompt_label">任務描述</string>
     <string name="automation_export_cancelled">已取消匯出。</string>
     <string name="automation_export_diagnostics">匯出診斷套件</string>
+    <string name="automation_export_diagnostics_full">匯出完整診斷套件</string>
+    <string name="automation_export_diagnostics_redacted">匯出脫敏診斷套件</string>
+    <string name="automation_export_full_capture_enabled">採集此任務的完整診斷</string>
+    <string name="automation_export_full_capture_summary">預設開啟。記錄此任務的名稱和提示詞、模型與工具請求/結果、最終回覆及失敗詳情。關閉後會停止後續採集並清除此任務已儲存的完整詳情；不會補錄舊記錄。每次執行在認領時固定採集模式：執行開始後才開啟完整採集，須到下一次執行才生效；關閉會立即停止目前採集，之後重新開啟也不會恢復已開始的執行。</string>
+    <string name="automation_export_full_capture_loading">正在讀取此任務的完整診斷設定…</string>
+    <string name="automation_export_full_capture_load_failed">無法讀取此任務的完整診斷設定。請重新開啟任務詳情後重試。</string>
+    <string name="automation_export_full_capture_save_failed">無法更新完整診斷設定，請重試。</string>
+    <string name="automation_export_full_capture_cleanup_pending">完整採集已關閉，舊完整詳情正等待重試清理，無法匯出。</string>
+    <string name="automation_export_full_capture_warning">完整診斷套件可能包含私密或敏感文字，包括自由文字形式的任務、模型和工具內容。會排除專用的認證與簽署金鑰，但文字過濾無法保證移除所有秘密。僅用於私人排查，不會自動上傳。</string>
     <string name="automation_export_failed">無法匯出診斷套件。請檢查可用儲存空間後重試。</string>
     <string name="automation_export_picking">請選擇診斷套件的儲存位置…</string>
     <string name="automation_export_privacy">ZIP 檔案預設不包含任務提示詞、回覆內容、帳單資料、螢幕截圖、憑證或通知內容。可能包含執行時間等操作中繼資料。檔案僅儲存在本機，不會上傳。</string>

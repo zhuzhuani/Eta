@@ -117,19 +117,51 @@ internal object VirtualDisplayController {
     fun acquireAutomationDisplay(
         context: Context,
         rootAvailable: () -> Boolean,
+        onFailureDetail: (AutomationDisplayFailureDetail) -> Unit = {},
         onFailure: (AutomationDisplayFailure) -> Unit = {},
     ): AutomationDisplayLease? {
         fun report(reason: AutomationDisplayFailure) {
             runCatching { onFailure(reason) }
         }
+        fun reportDetail(
+            reason: AutomationDisplayFailure,
+            stage: AutomationDisplayFailureDetail.Stage,
+            code: AutomationDisplayFailureDetail.Code,
+            error: Throwable? = null,
+            branch: AutomationDisplayFailureDetail.Branch? = null,
+        ) {
+            runCatching {
+                onFailureDetail(
+                    AutomationDisplayFailureDetail(
+                        reason = reason,
+                        stage = stage,
+                        code = code,
+                        exceptionKind = AutomationDisplayFailureDetail.safeExceptionKind(error),
+                        causeKind = AutomationDisplayFailureDetail.safeCauseKind(error),
+                        sdkInt = Build.VERSION.SDK_INT,
+                        processUid = null,
+                        branch = branch,
+                    ),
+                )
+            }
+        }
         if (!rootAvailable()) {
             report(AutomationDisplayFailure.ROOT_UNAVAILABLE)
+            reportDetail(
+                AutomationDisplayFailure.ROOT_UNAVAILABLE,
+                AutomationDisplayFailureDetail.Stage.PRECONDITION,
+                AutomationDisplayFailureDetail.Code.ROOT_UNAVAILABLE,
+            )
             return null
         }
         val appContext = context.applicationContext
         return synchronized(creationLock) {
             val id = ensureVirtualDisplayInternal(
-                appContext, rootAvailable, automation = true, onAutomationFailure = onFailure,
+                appContext,
+                rootAvailable,
+                automation = true,
+                onAutomationFailure = onFailure,
+                onAutomationFailureDetail = onFailureDetail,
             ) ?: return null
             val token = synchronized(lock) {
                 automationToken?.takeIf { current ->
@@ -155,17 +187,51 @@ internal object VirtualDisplayController {
         rootAvailable: () -> Boolean,
         automation: Boolean,
         onAutomationFailure: (AutomationDisplayFailure) -> Unit = {},
+        onAutomationFailureDetail: (AutomationDisplayFailureDetail) -> Unit = {},
     ): Int? {
         fun report(reason: AutomationDisplayFailure) {
             if (automation) runCatching { onAutomationFailure(reason) }
         }
+        fun reportDetail(
+            reason: AutomationDisplayFailure,
+            stage: AutomationDisplayFailureDetail.Stage,
+            code: AutomationDisplayFailureDetail.Code,
+            error: Throwable? = null,
+            branch: AutomationDisplayFailureDetail.Branch? = null,
+        ) {
+            if (!automation) return
+            runCatching {
+                onAutomationFailureDetail(
+                    AutomationDisplayFailureDetail(
+                        reason = reason,
+                        stage = stage,
+                        code = code,
+                        exceptionKind = AutomationDisplayFailureDetail.safeExceptionKind(error),
+                        causeKind = AutomationDisplayFailureDetail.safeCauseKind(error),
+                        sdkInt = Build.VERSION.SDK_INT,
+                        processUid = null,
+                        branch = branch,
+                    ),
+                )
+            }
+        }
         if (!CanvasRoutingPolicy.supportsBackgroundDisplay(Build.VERSION.SDK_INT)) {
             report(AutomationDisplayFailure.DISPLAY_UNSUPPORTED)
+            reportDetail(
+                AutomationDisplayFailure.DISPLAY_UNSUPPORTED,
+                AutomationDisplayFailureDetail.Stage.PRECONDITION,
+                AutomationDisplayFailureDetail.Code.DISPLAY_UNSUPPORTED,
+            )
             return null
         }
         val appContext = context.applicationContext
         val manager = appContext.getSystemService(DisplayManager::class.java) ?: run {
             report(AutomationDisplayFailure.DISPLAY_UNAVAILABLE)
+            reportDetail(
+                AutomationDisplayFailure.DISPLAY_UNAVAILABLE,
+                AutomationDisplayFailureDetail.Stage.DISPLAY_VALIDATION,
+                AutomationDisplayFailureDetail.Code.DISPLAY_UNAVAILABLE,
+            )
             return null
         }
         // 创建可包含 Binder 与 Root 等待；发布状态和释放不等待这把创建锁。
@@ -177,6 +243,11 @@ internal object VirtualDisplayController {
             if (existing != null) {
                 if (automation) {
                     report(AutomationDisplayFailure.VIRTUAL_DISPLAY_OCCUPIED)
+                    reportDetail(
+                        AutomationDisplayFailure.VIRTUAL_DISPLAY_OCCUPIED,
+                        AutomationDisplayFailureDetail.Stage.PRECONDITION,
+                        AutomationDisplayFailureDetail.Code.VIRTUAL_DISPLAY_OCCUPIED,
+                    )
                     return null
                 }
                 val bridge = synchronized(lock) { displayResources?.bridge }
@@ -207,7 +278,14 @@ internal object VirtualDisplayController {
                 if (rootAvailable()) {
                     rootBridgeCreationAttempted = true
                     rootBridge = RootVirtualDisplayBridge.create(
-                        appContext, frames.surface, width, height, densityDpi, rootAvailable, automation,
+                        appContext,
+                        frames.surface,
+                        width,
+                        height,
+                        densityDpi,
+                        rootAvailable,
+                        automation,
+                        onFailureDetail = onAutomationFailureDetail,
                     ) { process ->
                         val ownsSession = synchronized(lock) {
                             sessionState.isCurrent(token) && displayResources?.bridge?.process === process

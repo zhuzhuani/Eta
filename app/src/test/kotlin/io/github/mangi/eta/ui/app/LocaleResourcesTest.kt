@@ -112,6 +112,114 @@ class LocaleResourcesTest {
         assertTrue(localizedString("en-US", R.string.automation_export_privacy).contains("not uploaded"))
         assertTrue(localizedString("zh-CN", R.string.automation_export_privacy).contains("不会上传"))
         assertTrue(localizedString("zh-TW", R.string.automation_export_privacy).contains("不會上傳"))
+        assertEquals(
+            "Capture full task diagnostics",
+            localizedString("en-US", R.string.automation_export_full_capture_enabled),
+        )
+        assertEquals(
+            "采集此任务的完整诊断",
+            localizedString("zh-CN", R.string.automation_export_full_capture_enabled),
+        )
+        assertEquals(
+            "採集此任務的完整診斷",
+            localizedString("zh-TW", R.string.automation_export_full_capture_enabled),
+        )
+        assertTrue(
+            localizedString("en-US", R.string.automation_export_full_capture_summary)
+                .contains("On by default"),
+        )
+        assertTrue(
+            localizedString("zh-CN", R.string.automation_export_full_capture_summary)
+                .contains("默认开启"),
+        )
+        assertTrue(
+            localizedString("zh-TW", R.string.automation_export_full_capture_summary)
+                .contains("預設開啟"),
+        )
+        assertTrue(
+            localizedString("en-US", R.string.automation_export_full_capture_summary)
+                .contains("Capture mode is fixed when each run is claimed"),
+        )
+        assertTrue(
+            localizedString("en-US", R.string.automation_export_full_capture_summary)
+                .contains("disabling it immediately stops that run’s capture"),
+        )
+        assertTrue(
+            localizedString("zh-CN", R.string.automation_export_full_capture_summary)
+                .contains("每次运行在认领时固定采集模式"),
+        )
+        assertTrue(
+            localizedString("zh-CN", R.string.automation_export_full_capture_summary)
+                .contains("关闭会立即停止当前采集"),
+        )
+        assertTrue(
+            localizedString("zh-TW", R.string.automation_export_full_capture_summary)
+                .contains("每次執行在認領時固定採集模式"),
+        )
+        assertTrue(
+            localizedString("zh-TW", R.string.automation_export_full_capture_summary)
+                .contains("關閉會立即停止目前採集"),
+        )
+        assertTrue(
+            localizedString("en-US", R.string.automation_export_full_capture_warning)
+                .contains("cannot guarantee every secret is removed"),
+        )
+        assertTrue(
+            localizedString("zh-CN", R.string.automation_export_full_capture_warning)
+                .contains("无法保证移除所有秘密"),
+        )
+        assertTrue(
+            localizedString("zh-TW", R.string.automation_export_full_capture_warning)
+                .contains("無法保證移除所有秘密"),
+        )
+        assertTrue(
+            localizedString("en-US", R.string.automation_export_full_capture_warning)
+                .contains("Nothing is uploaded automatically"),
+        )
+        assertTrue(
+            localizedString("zh-CN", R.string.automation_export_full_capture_warning)
+                .contains("不会自动上传"),
+        )
+        assertTrue(
+            localizedString("zh-TW", R.string.automation_export_full_capture_warning)
+                .contains("不會自動上傳"),
+        )
+        assertEquals(
+            "Loading this task’s full-diagnostics setting…",
+            localizedString("en-US", R.string.automation_export_full_capture_loading),
+        )
+        assertEquals(
+            "正在读取此任务的完整诊断设置…",
+            localizedString("zh-CN", R.string.automation_export_full_capture_loading),
+        )
+        assertEquals(
+            "正在讀取此任務的完整診斷設定…",
+            localizedString("zh-TW", R.string.automation_export_full_capture_loading),
+        )
+        assertEquals(
+            "Couldn’t read this task’s full-diagnostics setting. Retry by reopening task details.",
+            localizedString("en-US", R.string.automation_export_full_capture_load_failed),
+        )
+        assertEquals(
+            "无法读取此任务的完整诊断设置。请重新打开任务详情后重试。",
+            localizedString("zh-CN", R.string.automation_export_full_capture_load_failed),
+        )
+        assertEquals(
+            "無法讀取此任務的完整診斷設定。請重新開啟任務詳情後重試。",
+            localizedString("zh-TW", R.string.automation_export_full_capture_load_failed),
+        )
+        assertEquals(
+            "Full capture is disabled. Cleanup of older full-detail data is pending a retry; it cannot be exported.",
+            localizedString("en-US", R.string.automation_export_full_capture_cleanup_pending),
+        )
+        assertEquals(
+            "完整采集已关闭，旧完整详情正在等待重试清理，无法导出。",
+            localizedString("zh-CN", R.string.automation_export_full_capture_cleanup_pending),
+        )
+        assertEquals(
+            "完整採集已關閉，舊完整詳情正等待重試清理，無法匯出。",
+            localizedString("zh-TW", R.string.automation_export_full_capture_cleanup_pending),
+        )
     }
 
     @Suppress("DEPRECATION")

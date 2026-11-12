@@ -64,6 +64,15 @@
     <string name="automation_task_prompt_label">Task description</string>
     <string name="automation_export_cancelled">Export cancelled.</string>
     <string name="automation_export_diagnostics">Export diagnostic ZIP</string>
+    <string name="automation_export_diagnostics_full">Export full diagnostic ZIP</string>
+    <string name="automation_export_diagnostics_redacted">Export redacted diagnostic ZIP</string>
+    <string name="automation_export_full_capture_enabled">Capture full task diagnostics</string>
+    <string name="automation_export_full_capture_summary">On by default. Records this task’s name and prompt, model and tool requests/results, final responses, and failure details. Turning it off stops future capture and clears this task’s stored full details; old entries are not backfilled. Capture mode is fixed when each run is claimed: enabling it after a run starts takes effect on the next run; disabling it immediately stops that run’s capture, and turning it back on never resumes an existing run.</string>
+    <string name="automation_export_full_capture_loading">Loading this task’s full-diagnostics setting…</string>
+    <string name="automation_export_full_capture_load_failed">Couldn’t read this task’s full-diagnostics setting. Retry by reopening task details.</string>
+    <string name="automation_export_full_capture_save_failed">Couldn’t update the full-diagnostics setting. Try again.</string>
+    <string name="automation_export_full_capture_cleanup_pending">Full capture is disabled. Cleanup of older full-detail data is pending a retry; it cannot be exported.</string>
+    <string name="automation_export_full_capture_warning">Full diagnostic ZIPs may contain private or sensitive text, including free-form task, model, and tool content. Dedicated authentication and signing secrets are excluded, but free-text filtering cannot guarantee every secret is removed. Use only for private troubleshooting. Nothing is uploaded automatically.</string>
     <string name="automation_export_failed">Couldn’t export the diagnostic ZIP. Check available storage and try again.</string>
     <string name="automation_export_picking">Choose where to save the diagnostic ZIP…</string>
     <string name="automation_export_privacy">The ZIP excludes task prompts, response content, billing data, screenshots, credentials, and notification content. It may include run timestamps and other operational metadata. The file is saved locally and is not uploaded.</string>

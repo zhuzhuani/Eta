@@ -77,6 +77,7 @@ import top.yukonga.miuix.kmp.icon.basic.ArrowRight
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 private val taskDiagnosticsExportMutex = Mutex()
+private val taskDiagnosticsCaptureSettingsMutex = Mutex()
 
 @Composable
 private fun TaskPreferenceGroup(content: @Composable () -> Unit) {
@@ -96,13 +97,23 @@ internal fun AgentTasksScreen(onBack: () -> Unit) {
     var notice by remember { mutableStateOf<String?>(null) }
     var openedTaskId by remember { mutableStateOf<String?>(null) }
     var pendingExportTaskId by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingExportIncludeSensitive by rememberSaveable { mutableStateOf<Boolean?>(null) }
     var pendingExportUri by rememberSaveable { mutableStateOf<String?>(null) }
     var exportStatusId by rememberSaveable { mutableStateOf<Int?>(null) }
+    var captureSettingTaskId by rememberSaveable { mutableStateOf<String?>(null) }
+    var fullCaptureEnabled by rememberSaveable { mutableStateOf(true) }
+    var fullCaptureSettingLoaded by rememberSaveable { mutableStateOf(false) }
+    var fullCaptureSettingSaving by rememberSaveable { mutableStateOf(false) }
+    var fullCaptureSettingLoadFailed by rememberSaveable { mutableStateOf(false) }
+    var fullCaptureSettingSaveFailed by rememberSaveable { mutableStateOf(false) }
+    var fullCaptureCleanupPending by rememberSaveable { mutableStateOf(false) }
+    var captureSettingOperationId by remember { mutableStateOf(0) }
     val exportLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.CreateDocument("application/zip"),
     ) { uri ->
-        if (uri == null || pendingExportTaskId == null) {
+        if (uri == null || pendingExportTaskId == null || pendingExportIncludeSensitive == null) {
             pendingExportTaskId = null
+            pendingExportIncludeSensitive = null
             pendingExportUri = null
             exportStatusId = R.string.automation_export_cancelled
         } else {
@@ -110,10 +121,11 @@ internal fun AgentTasksScreen(onBack: () -> Unit) {
             exportStatusId = R.string.automation_export_running
         }
     }
-    LaunchedEffect(pendingExportTaskId, pendingExportUri) {
+    LaunchedEffect(pendingExportTaskId, pendingExportIncludeSensitive, pendingExportUri) {
         val taskId = pendingExportTaskId
+        val includeSensitive = pendingExportIncludeSensitive
         val uriText = pendingExportUri
-        if (taskId != null && uriText != null) {
+        if (taskId != null && includeSensitive != null && uriText != null) {
             val exported = try {
                 taskDiagnosticsExportMutex.withLock {
                     currentCoroutineContext().ensureActive()
@@ -121,7 +133,9 @@ internal fun AgentTasksScreen(onBack: () -> Unit) {
                         currentCoroutineContext().ensureActive()
                         val output = context.contentResolver.openOutputStream(Uri.parse(uriText), "wt")
                             ?: error("Unable to open destination")
-                        output.use { AgentTaskDiagnostics.export(context, taskId, it) }
+                        output.use {
+                            AgentTaskDiagnostics.export(context, taskId, it, includeSensitive = includeSensitive)
+                        }
                     }
                 }
                 true
@@ -136,19 +150,92 @@ internal fun AgentTasksScreen(onBack: () -> Unit) {
                 R.string.automation_export_failed
             }
             pendingExportTaskId = null
+            pendingExportIncludeSensitive = null
             pendingExportUri = null
         }
     }
-    fun requestExport(taskId: String) {
+    fun requestExport(taskId: String, includeSensitive: Boolean) {
         if (pendingExportTaskId != null) return
-        pendingExportTaskId = taskId
+        val selection = snapshotTaskDiagnosticsExportSelection(taskId, includeSensitive)
+        pendingExportTaskId = selection.taskId
+        pendingExportIncludeSensitive = selection.includeSensitive
         exportStatusId = R.string.automation_export_picking
         runCatching { exportLauncher.launch("eta-task-diagnostics.zip") }
             .onFailure {
                 pendingExportTaskId = null
+                pendingExportIncludeSensitive = null
                 pendingExportUri = null
                 exportStatusId = R.string.automation_export_failed
             }
+    }
+    LaunchedEffect(openedTaskId) {
+        val taskId = openedTaskId ?: return@LaunchedEffect
+        val operationId = captureSettingOperationId + 1
+        captureSettingOperationId = operationId
+        captureSettingTaskId = taskId
+        fullCaptureSettingLoaded = false
+        fullCaptureSettingLoadFailed = false
+        fullCaptureEnabled = false
+        fullCaptureSettingSaving = false
+        fullCaptureSettingSaveFailed = false
+        fullCaptureCleanupPending = false
+        val storedSetting = try {
+            withContext(Dispatchers.IO) {
+                taskDiagnosticsCaptureSettingsMutex.withLock {
+                    currentCoroutineContext().ensureActive()
+                    AgentTaskDiagnostics.isFullCaptureEnabled(context, taskId)
+                }
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (_: Throwable) {
+            null
+        }
+        if (openedTaskId == taskId && captureSettingOperationId == operationId) {
+            if (storedSetting == null) {
+                fullCaptureSettingLoadFailed = true
+            } else {
+                fullCaptureEnabled = storedSetting
+                fullCaptureSettingLoaded = true
+            }
+        }
+    }
+    fun updateFullCapture(taskId: String, enabled: Boolean) {
+        if (captureSettingTaskId != taskId || !fullCaptureSettingLoaded || fullCaptureSettingSaving) return
+        val operationId = captureSettingOperationId + 1
+        captureSettingOperationId = operationId
+        fullCaptureSettingSaving = true
+        fullCaptureSettingLoadFailed = false
+        fullCaptureSettingSaveFailed = false
+        fullCaptureCleanupPending = false
+        scope.launch {
+            val update = try {
+                Result.success(
+                    withContext(Dispatchers.IO) {
+                        taskDiagnosticsCaptureSettingsMutex.withLock {
+                            currentCoroutineContext().ensureActive()
+                            val cleanupComplete = AgentTaskDiagnostics.setFullCaptureEnabled(context, taskId, enabled)
+                            val storedSetting = AgentTaskDiagnostics.isFullCaptureEnabled(context, taskId)
+                            cleanupComplete to storedSetting
+                        }
+                    },
+                )
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (failure: Throwable) {
+                Result.failure(failure)
+            }
+            if (openedTaskId != taskId || captureSettingOperationId != operationId) return@launch
+            fullCaptureSettingSaving = false
+            update.fold(
+                onSuccess = { (cleanupComplete, storedSetting) ->
+                    fullCaptureEnabled = storedSetting
+                    fullCaptureCleanupPending = !cleanupComplete && !storedSetting
+                    fullCaptureSettingSaveFailed = storedSetting != enabled || (!cleanupComplete && storedSetting)
+                },
+                onFailure = { fullCaptureSettingSaveFailed = true },
+            )
+        }
     }
     fun execute(tool: String, args: JSONObject, onSuccess: (() -> Unit)? = null) {
         scope.launch(Dispatchers.IO) {
@@ -179,10 +266,21 @@ internal fun AgentTasksScreen(onBack: () -> Unit) {
             task = openedTask,
             recentRuns = runs.filter { it.taskId == openedTask.id }.take(3),
             notice = notice,
+            fullCaptureEnabled = fullCaptureEnabled,
+            fullCaptureSettingReady = captureSettingTaskId == openedTask.id && fullCaptureSettingLoaded,
+            fullCaptureSettingLoadFailed = fullCaptureSettingLoadFailed,
+            fullCaptureSettingSaving = fullCaptureSettingSaving,
+            fullCaptureSettingSaveFailed = fullCaptureSettingSaveFailed,
+            fullCaptureCleanupPending = fullCaptureCleanupPending,
+            onFullCaptureChange = { enabled -> updateFullCapture(openedTask.id, enabled) },
             exportStatusId = exportStatusId,
+            pendingExportIncludeSensitive = pendingExportIncludeSensitive,
             isExportPending = pendingExportTaskId != null,
-            onExport = { requestExport(openedTask.id) },
-            onBack = { openedTaskId = null },
+            onExport = { requestExport(openedTask.id, fullCaptureEnabled) },
+            onBack = {
+                captureSettingOperationId += 1
+                openedTaskId = null
+            },
             onEnabledChange = { enabled ->
                 execute(
                     "tasks_update",
@@ -194,6 +292,7 @@ internal fun AgentTasksScreen(onBack: () -> Unit) {
             onCancel = { execute("tasks_cancel", JSONObject().put("taskId", openedTask.id)) },
             onDelete = {
                 execute("tasks_delete", JSONObject().put("taskId", openedTask.id)) {
+                    captureSettingOperationId += 1
                     openedTaskId = null
                 }
             },
@@ -273,7 +372,15 @@ private fun AgentTaskDetailPage(
     task: AgentTaskEntity,
     recentRuns: List<AgentTaskRunEntity>,
     notice: String?,
+    fullCaptureEnabled: Boolean,
+    fullCaptureSettingReady: Boolean,
+    fullCaptureSettingLoadFailed: Boolean,
+    fullCaptureSettingSaving: Boolean,
+    fullCaptureSettingSaveFailed: Boolean,
+    fullCaptureCleanupPending: Boolean,
+    onFullCaptureChange: (Boolean) -> Unit,
     exportStatusId: Int?,
+    pendingExportIncludeSensitive: Boolean?,
     isExportPending: Boolean,
     onExport: () -> Unit,
     onBack: () -> Unit,
@@ -407,21 +514,74 @@ private fun AgentTaskDetailPage(
                 }
             }
         }
+        item(key = "task-full-capture") {
+            TaskPreferenceGroup {
+                Column(
+                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    SwitchPreference(
+                        title = stringResource(R.string.automation_export_full_capture_enabled),
+                        summary = stringResource(R.string.automation_export_full_capture_summary),
+                        checked = fullCaptureEnabled,
+                        enabled = fullCaptureSettingReady && !fullCaptureSettingSaving && !isExportPending,
+                        onCheckedChange = onFullCaptureChange,
+                    )
+                    if (fullCaptureSettingLoadFailed) {
+                        Text(
+                            text = stringResource(R.string.automation_export_full_capture_load_failed),
+                            style = MiuixTheme.textStyles.footnote1,
+                            color = colors.error,
+                        )
+                    } else {
+                        Text(
+                            text = stringResource(
+                                when {
+                                    !fullCaptureSettingReady -> R.string.automation_export_full_capture_loading
+                                    fullCaptureEnabled -> R.string.automation_export_full_capture_warning
+                                    else -> R.string.automation_export_privacy
+                                },
+                            ),
+                            style = MiuixTheme.textStyles.footnote1,
+                            color = colors.onSurfaceVariantSummary,
+                        )
+                    }
+                    if (fullCaptureSettingSaveFailed) {
+                        Text(
+                            text = stringResource(R.string.automation_export_full_capture_save_failed),
+                            style = MiuixTheme.textStyles.footnote1,
+                            color = colors.error,
+                        )
+                    }
+                    if (fullCaptureCleanupPending) {
+                        Text(
+                            text = stringResource(R.string.automation_export_full_capture_cleanup_pending),
+                            style = MiuixTheme.textStyles.footnote1,
+                            color = colors.error,
+                        )
+                    }
+                }
+            }
+        }
         item(key = "task-export") {
             TaskPreferenceGroup {
                 Column(
                     modifier = Modifier.fillMaxWidth().padding(16.dp),
                     verticalArrangement = Arrangement.spacedBy(10.dp),
                 ) {
-                    Text(
-                        text = stringResource(R.string.automation_export_privacy),
-                        style = MiuixTheme.textStyles.footnote1,
-                        color = colors.onSurfaceVariantSummary,
-                    )
                     TextButton(
-                        text = stringResource(R.string.automation_export_diagnostics),
+                        text = stringResource(
+                            when {
+                                isExportPending && pendingExportIncludeSensitive == true ->
+                                    R.string.automation_export_diagnostics_full
+                                isExportPending && pendingExportIncludeSensitive == false ->
+                                    R.string.automation_export_diagnostics_redacted
+                                fullCaptureEnabled -> R.string.automation_export_diagnostics_full
+                                else -> R.string.automation_export_diagnostics_redacted
+                            },
+                        ),
                         onClick = onExport,
-                        enabled = !isExportPending,
+                        enabled = !isExportPending && fullCaptureSettingReady && !fullCaptureSettingSaving,
                         modifier = Modifier.fillMaxWidth(),
                         minHeight = 48.dp,
                         colors = ButtonDefaults.textButtonColorsPrimary(),

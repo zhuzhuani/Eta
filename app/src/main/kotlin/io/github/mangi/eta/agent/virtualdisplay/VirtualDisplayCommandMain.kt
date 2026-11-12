@@ -79,20 +79,51 @@ internal object VirtualDisplayCommandMain {
     @Volatile
     private var retainedAutomationWakeLock: PowerManager.WakeLock? = null
 
+    private data class FailureInfo(
+        val stage: AutomationDisplayFailureDetail.Stage,
+        val code: AutomationDisplayFailureDetail.Code,
+        val exceptionKind: AutomationDisplayFailureDetail.ExceptionKind? = null,
+        val causeKind: AutomationDisplayFailureDetail.ExceptionKind? = null,
+        val branch: AutomationDisplayFailureDetail.Branch? = null,
+    )
+
+    @Volatile
+    private var failureInfo: FailureInfo? = null
+
     @JvmStatic
     @Suppress("DEPRECATION")
     fun main(args: Array<String>) {
+        failureInfo = null
         try {
             val uid = Process.myUid()
             if (uid != Process.ROOT_UID && uid != Process.SYSTEM_UID) {
-                println(RESULT_PREFIX + JSONObject().put("ok", false).put("code", "ROOT_REQUIRED"))
+                emitFailure(
+                    AutomationDisplayFailureDetail.Stage.PRECONDITION,
+                    AutomationDisplayFailureDetail.Code.ROOT_REQUIRED,
+                    branch = AutomationDisplayFailureDetail.Branch.SYSTEM_CONTEXT,
+                )
                 exitProcess(1)
             }
             if (Looper.getMainLooper() == null) Looper.prepareMainLooper()
             val reader = BufferedReader(InputStreamReader(System.`in`, Charsets.UTF_8))
             val firstLine = reader.readLine()?.trim().orEmpty()
-            if (firstLine.isEmpty()) exitProcess(1)
-            val request = JSONObject(firstLine)
+            if (firstLine.isEmpty()) {
+                emitFailure(
+                    AutomationDisplayFailureDetail.Stage.REQUEST_HANDSHAKE,
+                    AutomationDisplayFailureDetail.Code.MALFORMED_RESULT,
+                )
+                exitProcess(1)
+            }
+            val request = try {
+                JSONObject(firstLine)
+            } catch (exception: Throwable) {
+                emitFailure(
+                    AutomationDisplayFailureDetail.Stage.REQUEST_HANDSHAKE,
+                    AutomationDisplayFailureDetail.Code.MALFORMED_RESULT,
+                    exception,
+                )
+                exitProcess(1)
+            }
             when (request.optString("action")) {
                 "hold_display" -> holdVirtualDisplay(request, reader)
                 "move_to_main" -> {
@@ -101,16 +132,19 @@ internal object VirtualDisplayCommandMain {
                     exitProcess(0)
                 }
                 else -> {
-                    println(RESULT_PREFIX + JSONObject().put("ok", false).put("code", "UNKNOWN_ACTION"))
+                    emitFailure(
+                        AutomationDisplayFailureDetail.Stage.PRECONDITION,
+                        AutomationDisplayFailureDetail.Code.HELPER_FAILED,
+                    )
                     exitProcess(1)
                 }
             }
         } catch (t: Throwable) {
-            println(
-                RESULT_PREFIX + JSONObject()
-                    .put("ok", false)
-                    .put("code", "BRIDGE_ERROR")
-                    .put("type", t.javaClass.simpleName),
+            emitFailure(
+                AutomationDisplayFailureDetail.Stage.PROCESS_LIFECYCLE,
+                AutomationDisplayFailureDetail.Code.BRIDGE_EXCEPTION,
+                t,
+                AutomationDisplayFailureDetail.Branch.SYSTEM_CONTEXT,
             )
             exitProcess(1)
         }
@@ -119,7 +153,11 @@ internal object VirtualDisplayCommandMain {
     private fun holdVirtualDisplay(request: JSONObject, reader: BufferedReader) {
         val automation = request.optBoolean("automation", false)
         if (!CanvasRoutingPolicy.supportsBackgroundDisplay(android.os.Build.VERSION.SDK_INT)) {
-            println(RESULT_PREFIX + JSONObject().put("ok", false).put("code", "DISPLAY_ISOLATION_UNSUPPORTED"))
+            emitFailure(
+                AutomationDisplayFailureDetail.Stage.DISPLAY_ISOLATION,
+                AutomationDisplayFailureDetail.Code.DISPLAY_UNSUPPORTED,
+                branch = AutomationDisplayFailureDetail.Branch.DISPLAY_MANAGER,
+            )
             exitProcess(1)
         }
         val userId = request.optInt("user_id", 0)
@@ -130,7 +168,11 @@ internal object VirtualDisplayCommandMain {
 
         val surface = acquireSurfaceFromApp(userId, token)
         if (surface == null || !surface.isValid) {
-            println(RESULT_PREFIX + JSONObject().put("ok", false).put("code", "SURFACE_UNAVAILABLE"))
+            emitFailure(
+                AutomationDisplayFailureDetail.Stage.SURFACE_ACQUISITION,
+                AutomationDisplayFailureDetail.Code.SURFACE_UNAVAILABLE,
+                branch = AutomationDisplayFailureDetail.Branch.SURFACE_PROVIDER,
+            )
             exitProcess(1)
         }
 
@@ -140,7 +182,11 @@ internal object VirtualDisplayCommandMain {
         val virtualDisplay = createTrustedVirtualDisplay(surface, width, height, densityDpi, automation)
         if (virtualDisplay == null) {
             surface.release()
-            println(RESULT_PREFIX + JSONObject().put("ok", false).put("code", "CREATE_DISPLAY_FAILED"))
+            emitFailure(
+                AutomationDisplayFailureDetail.Stage.CREATE_DISPLAY,
+                AutomationDisplayFailureDetail.Code.CREATE_DISPLAY_FAILED,
+                branch = AutomationDisplayFailureDetail.Branch.VIRTUAL_DISPLAY_CONFIG,
+            )
             exitProcess(1)
         }
 
@@ -148,7 +194,11 @@ internal object VirtualDisplayCommandMain {
         if (displayId <= 0) {
             runCatching { virtualDisplay.release() }
             surface.release()
-            println(RESULT_PREFIX + JSONObject().put("ok", false).put("code", "INVALID_DISPLAY_ID"))
+            emitFailure(
+                AutomationDisplayFailureDetail.Stage.DISPLAY_ID_VALIDATION,
+                AutomationDisplayFailureDetail.Code.INVALID_DISPLAY_ID,
+                branch = AutomationDisplayFailureDetail.Branch.DISPLAY_MANAGER,
+            )
             exitProcess(1)
         }
 
@@ -156,14 +206,34 @@ internal object VirtualDisplayCommandMain {
         retainedSurface = surface
         if (automation && !acquireAutomationDisplayWakeLock(displayId)) {
             releaseRetainedDisplay()
-            println(RESULT_PREFIX + JSONObject().put("ok", false).put("code", "DISPLAY_WAKE_LOCK_UNAVAILABLE"))
+            emitFailure(
+                AutomationDisplayFailureDetail.Stage.DISPLAY_WAKE_LOCK,
+                AutomationDisplayFailureDetail.Code.DISPLAY_WAKE_LOCK_UNAVAILABLE,
+                branch = AutomationDisplayFailureDetail.Branch.DISPLAY_WAKE_LOCK,
+            )
             exitProcess(1)
         }
-        if (!CanvasRoutingPolicy.hasRequiredDisplayFlags(virtualDisplay.display.flags) ||
-            !applyDisplayImePolicyHide(displayId)
-        ) {
+        if (!CanvasRoutingPolicy.hasRequiredDisplayFlags(virtualDisplay.display.flags)) {
+            recordFailure(
+                AutomationDisplayFailureDetail.Stage.DISPLAY_ISOLATION,
+                AutomationDisplayFailureDetail.Code.DISPLAY_ISOLATION_UNAVAILABLE,
+                branch = AutomationDisplayFailureDetail.Branch.DISPLAY_FLAGS,
+            )
             releaseRetainedDisplay()
-            println(RESULT_PREFIX + JSONObject().put("ok", false).put("code", "DISPLAY_ISOLATION_UNAVAILABLE"))
+            emitFailure(
+                AutomationDisplayFailureDetail.Stage.DISPLAY_ISOLATION,
+                AutomationDisplayFailureDetail.Code.DISPLAY_ISOLATION_UNAVAILABLE,
+                branch = AutomationDisplayFailureDetail.Branch.DISPLAY_FLAGS,
+            )
+            exitProcess(1)
+        }
+        if (!applyDisplayImePolicyHide(displayId)) {
+            releaseRetainedDisplay()
+            emitFailure(
+                AutomationDisplayFailureDetail.Stage.DISPLAY_ISOLATION,
+                AutomationDisplayFailureDetail.Code.DISPLAY_ISOLATION_UNAVAILABLE,
+                branch = AutomationDisplayFailureDetail.Branch.IME_POLICY,
+            )
             exitProcess(1)
         }
 
@@ -199,12 +269,28 @@ internal object VirtualDisplayCommandMain {
     }
 
     private fun acquireAutomationDisplayWakeLock(displayId: Int): Boolean {
-        val power = runCatching {
+        val powerResult = runCatching {
             val thread = Class.forName("android.app.ActivityThread").getMethod("systemMain").invoke(null)
             val context = Class.forName("android.app.ActivityThread").getMethod("getSystemContext").invoke(thread) as android.content.Context
             context.getSystemService(PowerManager::class.java)
-        }.getOrNull() ?: return false
-        val lock = runCatching {
+        }
+        val power = powerResult.getOrElse { exception ->
+            recordFailure(
+                AutomationDisplayFailureDetail.Stage.DISPLAY_WAKE_LOCK,
+                AutomationDisplayFailureDetail.Code.DISPLAY_WAKE_LOCK_UNAVAILABLE,
+                exception,
+                AutomationDisplayFailureDetail.Branch.SYSTEM_CONTEXT,
+            )
+            return false
+        } ?: run {
+            recordFailure(
+                AutomationDisplayFailureDetail.Stage.DISPLAY_WAKE_LOCK,
+                AutomationDisplayFailureDetail.Code.DISPLAY_WAKE_LOCK_UNAVAILABLE,
+                branch = AutomationDisplayFailureDetail.Branch.SYSTEM_CONTEXT,
+            )
+            return false
+        }
+        val lockResult = runCatching {
             val method = PowerManager::class.java.getMethod(
                 "newWakeLock", Int::class.javaPrimitiveType, String::class.java, Int::class.javaPrimitiveType,
             )
@@ -217,21 +303,83 @@ internal object VirtualDisplayCommandMain {
                 setReferenceCounted(false)
                 acquire(60_000L)
             }
-        }.getOrNull() ?: return false
-        retainedAutomationWakeLock = lock
+        }
+        val lock = lockResult.getOrElse { exception ->
+            recordFailure(
+                AutomationDisplayFailureDetail.Stage.DISPLAY_WAKE_LOCK,
+                AutomationDisplayFailureDetail.Code.DISPLAY_WAKE_LOCK_UNAVAILABLE,
+                exception,
+                AutomationDisplayFailureDetail.Branch.DISPLAY_WAKE_LOCK,
+            )
+            return false
+        }
         val startedAt = android.os.SystemClock.elapsedRealtime()
-        val manager = runCatching {
+        val managerResult = runCatching {
             val thread = Class.forName("android.app.ActivityThread").getMethod("systemMain").invoke(null)
             val context = Class.forName("android.app.ActivityThread").getMethod("getSystemContext").invoke(thread) as android.content.Context
             context.getSystemService(android.hardware.display.DisplayManager::class.java)
-        }.getOrNull()
+        }
+        val manager = managerResult.getOrElse { exception ->
+            runCatching { if (lock.isHeld) lock.release() }
+            recordFailure(
+                AutomationDisplayFailureDetail.Stage.DISPLAY_WAKE_LOCK,
+                AutomationDisplayFailureDetail.Code.DISPLAY_WAKE_LOCK_UNAVAILABLE,
+                exception,
+                AutomationDisplayFailureDetail.Branch.DISPLAY_MANAGER_LOOKUP,
+            )
+            return false
+        } ?: run {
+            runCatching { if (lock.isHeld) lock.release() }
+            recordFailure(
+                AutomationDisplayFailureDetail.Stage.DISPLAY_WAKE_LOCK,
+                AutomationDisplayFailureDetail.Code.DISPLAY_WAKE_LOCK_UNAVAILABLE,
+                branch = AutomationDisplayFailureDetail.Branch.DISPLAY_MANAGER_LOOKUP,
+            )
+            return false
+        }
+        retainedAutomationWakeLock = lock
         Thread({
             while (retainedAutomationWakeLock === lock) {
                 try { Thread.sleep(20_000L) } catch (_: InterruptedException) { break }
-                if (manager?.getDisplay(displayId) == null || retainedAutomationWakeLock !== lock ||
-                    android.os.SystemClock.elapsedRealtime() - startedAt >= 30L * 60L * 1_000L
-                ) break
-                runCatching { lock.acquire(60_000L) }
+                if (retainedAutomationWakeLock !== lock) break
+                if (android.os.SystemClock.elapsedRealtime() - startedAt >= 30L * 60L * 1_000L) break
+                val displayPresent = try {
+                    manager.getDisplay(displayId) != null
+                } catch (exception: Throwable) {
+                    recordFailure(
+                        AutomationDisplayFailureDetail.Stage.DISPLAY_VALIDATION,
+                        AutomationDisplayFailureDetail.Code.DISPLAY_LOST,
+                        exception,
+                        AutomationDisplayFailureDetail.Branch.DISPLAY_MANAGER_LOOKUP,
+                    )
+                    false
+                }
+                if (!displayPresent) {
+                    emitFailure(
+                        AutomationDisplayFailureDetail.Stage.DISPLAY_VALIDATION,
+                        AutomationDisplayFailureDetail.Code.DISPLAY_LOST,
+                        branch = AutomationDisplayFailureDetail.Branch.DISPLAY_MANAGER_LOOKUP,
+                    )
+                    releaseRetainedDisplay()
+                    exitProcess(1)
+                }
+                try {
+                    lock.acquire(60_000L)
+                } catch (exception: Throwable) {
+                    recordFailure(
+                        AutomationDisplayFailureDetail.Stage.DISPLAY_WAKE_LOCK,
+                        AutomationDisplayFailureDetail.Code.DISPLAY_WAKE_LOCK_UNAVAILABLE,
+                        exception,
+                        AutomationDisplayFailureDetail.Branch.DISPLAY_WAKE_LOCK,
+                    )
+                    emitFailure(
+                        AutomationDisplayFailureDetail.Stage.DISPLAY_WAKE_LOCK,
+                        AutomationDisplayFailureDetail.Code.DISPLAY_WAKE_LOCK_UNAVAILABLE,
+                        branch = AutomationDisplayFailureDetail.Branch.DISPLAY_WAKE_LOCK,
+                    )
+                    releaseRetainedDisplay()
+                    exitProcess(1)
+                }
             }
         }, "eta-automation-display-wakelock").apply { isDaemon = true; start() }
         return true
@@ -250,6 +398,43 @@ internal object VirtualDisplayCommandMain {
         runCatching { surf?.release() }
     }
 
+    private fun recordFailure(
+        stage: AutomationDisplayFailureDetail.Stage,
+        code: AutomationDisplayFailureDetail.Code,
+        error: Throwable? = null,
+        branch: AutomationDisplayFailureDetail.Branch? = null,
+    ) {
+        failureInfo = FailureInfo(
+            stage = stage,
+            code = code,
+            exceptionKind = AutomationDisplayFailureDetail.safeExceptionKind(error),
+            causeKind = AutomationDisplayFailureDetail.safeCauseKind(error),
+            branch = branch,
+        )
+    }
+
+    private fun emitFailure(
+        stage: AutomationDisplayFailureDetail.Stage,
+        code: AutomationDisplayFailureDetail.Code,
+        error: Throwable? = null,
+        branch: AutomationDisplayFailureDetail.Branch? = null,
+    ) {
+        if (failureInfo == null) recordFailure(stage, code, error, branch)
+        val detail = failureInfo ?: FailureInfo(stage, code)
+        println(
+            RESULT_PREFIX + JSONObject()
+                .put("ok", false)
+                .put("stage", detail.stage.name)
+                .put("code", detail.code.name)
+                .put("exception_kind", detail.exceptionKind?.name)
+                .put("cause_kind", detail.causeKind?.name)
+                .put("sdk_int", android.os.Build.VERSION.SDK_INT)
+                .put("process_uid", Process.myUid())
+                .put("branch", detail.branch?.name),
+        )
+        System.out.flush()
+    }
+
     @Suppress("DEPRECATION")
     private fun switchToSystemUidIfPossible() {
         runCatching {
@@ -259,78 +444,112 @@ internal object VirtualDisplayCommandMain {
         }
     }
 
-    private fun applyDisplayImePolicyHide(displayId: Int): Boolean = runCatching {
-        if (!CanvasRoutingPolicy.isVirtualDisplay(displayId)) return@runCatching false
-        switchToSystemUidIfPossible()
-        val wmgClass = Class.forName("android.view.WindowManagerGlobal")
-        val wms = wmgClass.getMethod("getWindowManagerService").invoke(null) ?: return@runCatching false
-        val setPolicy = wms.javaClass.methods.firstOrNull {
-            it.name == "setDisplayImePolicy" && it.parameterCount == 2
-        } ?: return@runCatching false
-        setPolicy.invoke(wms, displayId, CanvasRoutingPolicy.DISPLAY_IME_POLICY_HIDE)
-        val getPolicy = wms.javaClass.methods.firstOrNull {
-            it.name == "getDisplayImePolicy" && it.parameterCount == 1
+    private fun applyDisplayImePolicyHide(displayId: Int): Boolean {
+        var branch = AutomationDisplayFailureDetail.Branch.SYSTEM_CONTEXT
+        fun unavailable(error: Throwable? = null): Boolean {
+            recordFailure(
+                AutomationDisplayFailureDetail.Stage.DISPLAY_ISOLATION,
+                AutomationDisplayFailureDetail.Code.DISPLAY_ISOLATION_UNAVAILABLE,
+                error,
+                branch,
+            )
+            return false
         }
-        val actual = getPolicy?.invoke(wms, displayId) as? Int
-        actual == CanvasRoutingPolicy.DISPLAY_IME_POLICY_HIDE
-    }.getOrDefault(false)
+        return try {
+            if (!CanvasRoutingPolicy.isVirtualDisplay(displayId)) {
+                branch = AutomationDisplayFailureDetail.Branch.IME_POLICY
+                return unavailable()
+            }
+            switchToSystemUidIfPossible()
+            branch = AutomationDisplayFailureDetail.Branch.IME_POLICY
+            val wmgClass = Class.forName("android.view.WindowManagerGlobal")
+            val wms = wmgClass.getMethod("getWindowManagerService").invoke(null) ?: return unavailable()
+            val setPolicy = wms.javaClass.methods.firstOrNull {
+                it.name == "setDisplayImePolicy" && it.parameterCount == 2
+            } ?: return unavailable()
+            setPolicy.invoke(wms, displayId, CanvasRoutingPolicy.DISPLAY_IME_POLICY_HIDE)
+            val getPolicy = wms.javaClass.methods.firstOrNull {
+                it.name == "getDisplayImePolicy" && it.parameterCount == 1
+            }
+            val actual = getPolicy?.invoke(wms, displayId) as? Int
+            if (actual == CanvasRoutingPolicy.DISPLAY_IME_POLICY_HIDE) true else unavailable()
+        } catch (exception: Throwable) {
+            unavailable(exception)
+        }
+    }
 
     private fun acquireSurfaceFromApp(userId: Int, surfaceToken: String): Surface? {
-        val activityManager = Class.forName("android.app.ActivityManager")
-            .getMethod("getService")
-            .invoke(null) ?: return null
-        val iActivityManager = Class.forName("android.app.IActivityManager")
-        val iContentProvider = Class.forName("android.content.IContentProvider")
-        val binderToken: IBinder = Binder()
-        val holder = iActivityManager.getMethod(
-            "getContentProviderExternal",
-            String::class.java,
-            Int::class.javaPrimitiveType,
-            IBinder::class.java,
-            String::class.java,
-        ).invoke(
-            activityManager,
-            AccessibilityProtectionProtocol.HEALTH_AUTHORITY,
-            userId,
-            binderToken,
-            "EtaVirtualDisplay",
-        ) ?: return null
-
+        var branch = AutomationDisplayFailureDetail.Branch.SYSTEM_CONTEXT
+        fun unavailable(error: Throwable? = null): Surface? {
+            recordFailure(
+                AutomationDisplayFailureDetail.Stage.SURFACE_ACQUISITION,
+                if (error == null) AutomationDisplayFailureDetail.Code.SURFACE_UNAVAILABLE
+                else AutomationDisplayFailureDetail.Code.SURFACE_ACQUISITION_FAILED,
+                error,
+                branch,
+            )
+            return null
+        }
         return try {
-            val provider = holder.javaClass.getField("provider").get(holder) ?: return null
-            val attribution = android.content.AttributionSource.Builder(Process.myUid())
-                .setPackageName("root")
-                .build()
-            val extras = AccessibilityProtectionProtocol.request().apply {
-                putString(AccessibilityProtectionProtocol.EXTRA_SURFACE_TOKEN, surfaceToken)
-            }
-            val callMethod = iContentProvider.methods.firstOrNull {
-                it.name == "call" && it.parameterCount == 5
-            } ?: return null
-            val reply = callMethod.invoke(
-                provider,
-                attribution,
+            val activityManager = Class.forName("android.app.ActivityManager")
+                .getMethod("getService")
+                .invoke(null) ?: return unavailable()
+            val iActivityManager = Class.forName("android.app.IActivityManager")
+            val iContentProvider = Class.forName("android.content.IContentProvider")
+            val binderToken: IBinder = Binder()
+            branch = AutomationDisplayFailureDetail.Branch.SURFACE_PROVIDER
+            val holder = iActivityManager.getMethod(
+                "getContentProviderExternal",
+                String::class.java,
+                Int::class.javaPrimitiveType,
+                IBinder::class.java,
+                String::class.java,
+            ).invoke(
+                activityManager,
                 AccessibilityProtectionProtocol.HEALTH_AUTHORITY,
-                AccessibilityProtectionProtocol.VIRTUAL_DISPLAY_SURFACE_METHOD,
-                null,
-                extras,
-            ) as? Bundle ?: return null
-            reply.classLoader = Surface::class.java.classLoader
-            reply.getParcelable(AccessibilityProtectionProtocol.EXTRA_SURFACE, Surface::class.java)
-        } finally {
-            runCatching {
-                iActivityManager.getMethod(
-                    "removeContentProviderExternalAsUser",
-                    String::class.java,
-                    IBinder::class.java,
-                    Int::class.javaPrimitiveType,
-                ).invoke(
-                    activityManager,
+                userId,
+                binderToken,
+                "EtaVirtualDisplay",
+            ) ?: return unavailable()
+            try {
+                val provider = holder.javaClass.getField("provider").get(holder) ?: return unavailable()
+                val attribution = android.content.AttributionSource.Builder(Process.myUid())
+                    .setPackageName("root")
+                    .build()
+                val extras = AccessibilityProtectionProtocol.request().apply {
+                    putString(AccessibilityProtectionProtocol.EXTRA_SURFACE_TOKEN, surfaceToken)
+                }
+                val callMethod = iContentProvider.methods.firstOrNull {
+                    it.name == "call" && it.parameterCount == 5
+                } ?: return unavailable()
+                val reply = callMethod.invoke(
+                    provider,
+                    attribution,
                     AccessibilityProtectionProtocol.HEALTH_AUTHORITY,
-                    binderToken,
-                    userId,
-                )
+                    AccessibilityProtectionProtocol.VIRTUAL_DISPLAY_SURFACE_METHOD,
+                    null,
+                    extras,
+                ) as? Bundle ?: return unavailable()
+                reply.classLoader = Surface::class.java.classLoader
+                reply.getParcelable(AccessibilityProtectionProtocol.EXTRA_SURFACE, Surface::class.java)
+                    ?: return unavailable()
+            } finally {
+                runCatching {
+                    iActivityManager.getMethod(
+                        "removeContentProviderExternalAsUser",
+                        String::class.java,
+                        IBinder::class.java,
+                        Int::class.javaPrimitiveType,
+                    ).invoke(
+                        activityManager,
+                        AccessibilityProtectionProtocol.HEALTH_AUTHORITY,
+                        binderToken,
+                        userId,
+                    )
+                }
             }
+        } catch (exception: Throwable) {
+            unavailable(exception)
         }
     }
 
@@ -341,50 +560,73 @@ internal object VirtualDisplayCommandMain {
         height: Int,
         densityDpi: Int,
         automation: Boolean,
-    ): android.hardware.display.VirtualDisplay? = runCatching {
-        val activityThreadClass = Class.forName("android.app.ActivityThread")
-        val thread = activityThreadClass.getMethod("systemMain").invoke(null)
-        val systemContext = activityThreadClass.getMethod("getSystemContext").invoke(thread) as android.content.Context
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
-            val config = android.hardware.display.VirtualDisplayConfig.Builder(
-                CanvasRoutingPolicy.VIRTUAL_DISPLAY_NAME,
-                width,
-                height,
-                densityDpi,
-            )
-                .setSurface(surface)
-                .setFlags(if (automation) CanvasRoutingPolicy.AUTOMATION_FLAGS else CanvasRoutingPolicy.TRUSTED_INTERACTIVE_FLAGS)
-                .build()
-            val dmgClass = Class.forName("android.hardware.display.DisplayManagerGlobal")
-            val dmg = dmgClass.getMethod("getInstance").invoke(null)
-            val createMethod = dmgClass.methods.firstOrNull {
-                it.name == "createVirtualDisplay" &&
-                    it.parameterCount >= 3 &&
-                    it.parameterTypes[0] == android.content.Context::class.java &&
-                    it.parameterTypes[2] == android.hardware.display.VirtualDisplayConfig::class.java
-            }
-            if (createMethod != null) {
-                val args = arrayOfNulls<Any?>(createMethod.parameterCount)
-                args[0] = systemContext
-                args[1] = null // MediaProjection
-                args[2] = config
-                createMethod.invoke(dmg, *args) as? android.hardware.display.VirtualDisplay
+    ): android.hardware.display.VirtualDisplay? {
+        var branch = AutomationDisplayFailureDetail.Branch.SYSTEM_CONTEXT
+        val created = try {
+            val activityThreadClass = Class.forName("android.app.ActivityThread")
+            val thread = activityThreadClass.getMethod("systemMain").invoke(null)
+            val systemContext = activityThreadClass.getMethod("getSystemContext").invoke(thread) as android.content.Context
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                branch = AutomationDisplayFailureDetail.Branch.VIRTUAL_DISPLAY_CONFIG
+                val config = android.hardware.display.VirtualDisplayConfig.Builder(
+                    CanvasRoutingPolicy.VIRTUAL_DISPLAY_NAME,
+                    width,
+                    height,
+                    densityDpi,
+                )
+                    .setSurface(surface)
+                    .setFlags(if (automation) CanvasRoutingPolicy.AUTOMATION_FLAGS else CanvasRoutingPolicy.TRUSTED_INTERACTIVE_FLAGS)
+                    .build()
+                branch = AutomationDisplayFailureDetail.Branch.DISPLAY_MANAGER_GLOBAL
+                val dmgClass = Class.forName("android.hardware.display.DisplayManagerGlobal")
+                val dmg = dmgClass.getMethod("getInstance").invoke(null)
+                val createMethod = dmgClass.methods.firstOrNull {
+                    it.name == "createVirtualDisplay" &&
+                        it.parameterCount >= 3 &&
+                        it.parameterTypes[0] == android.content.Context::class.java &&
+                        it.parameterTypes[2] == android.hardware.display.VirtualDisplayConfig::class.java
+                }
+                if (createMethod != null) {
+                    val args = arrayOfNulls<Any?>(createMethod.parameterCount)
+                    args[0] = systemContext
+                    args[1] = null // MediaProjection
+                    args[2] = config
+                    createMethod.invoke(dmg, *args) as? android.hardware.display.VirtualDisplay
+                } else {
+                    branch = AutomationDisplayFailureDetail.Branch.DISPLAY_MANAGER
+                    val dm = systemContext.getSystemService(android.hardware.display.DisplayManager::class.java)
+                    dm?.createVirtualDisplay(config)
+                }
             } else {
+                branch = AutomationDisplayFailureDetail.Branch.DISPLAY_MANAGER
                 val dm = systemContext.getSystemService(android.hardware.display.DisplayManager::class.java)
-                dm?.createVirtualDisplay(config)
+                dm?.createVirtualDisplay(
+                    CanvasRoutingPolicy.VIRTUAL_DISPLAY_NAME,
+                    width,
+                    height,
+                    densityDpi,
+                    surface,
+                    if (automation) CanvasRoutingPolicy.AUTOMATION_FLAGS else CanvasRoutingPolicy.TRUSTED_INTERACTIVE_FLAGS,
+                )
             }
-        } else {
-            val dm = systemContext.getSystemService(android.hardware.display.DisplayManager::class.java)
-            dm?.createVirtualDisplay(
-                CanvasRoutingPolicy.VIRTUAL_DISPLAY_NAME,
-                width,
-                height,
-                densityDpi,
-                surface,
-                if (automation) CanvasRoutingPolicy.AUTOMATION_FLAGS else CanvasRoutingPolicy.TRUSTED_INTERACTIVE_FLAGS,
+        } catch (exception: Throwable) {
+            recordFailure(
+                AutomationDisplayFailureDetail.Stage.CREATE_DISPLAY,
+                AutomationDisplayFailureDetail.Code.CREATE_DISPLAY_FAILED,
+                exception,
+                branch,
+            )
+            null
+        }
+        if (created == null && failureInfo == null) {
+            recordFailure(
+                AutomationDisplayFailureDetail.Stage.CREATE_DISPLAY,
+                AutomationDisplayFailureDetail.Code.CREATE_DISPLAY_FAILED,
+                branch = branch,
             )
         }
-    }.getOrNull()
+        return created
+    }
 
     private fun moveTaskToMainDisplay(request: JSONObject): JSONObject {
         val displayId = request.optInt("display_id", Display.INVALID_DISPLAY)

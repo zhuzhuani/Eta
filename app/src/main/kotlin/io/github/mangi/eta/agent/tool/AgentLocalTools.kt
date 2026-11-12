@@ -32,6 +32,7 @@ import io.github.mangi.eta.agent.runtime.AgentRunCancelledException
 import io.github.mangi.eta.agent.runtime.GuiControlCoordinator
 import io.github.mangi.eta.agent.virtualdisplay.CanvasRoutingPolicy
 import io.github.mangi.eta.agent.virtualdisplay.AutomationDisplayFailure
+import io.github.mangi.eta.agent.virtualdisplay.AutomationDisplayFailureDetail
 import io.github.mangi.eta.agent.virtualdisplay.VirtualDisplayController
 import io.github.mangi.eta.agent.skill.SkillCompatibilityChecker
 import io.github.mangi.eta.agent.skill.SkillIndexService
@@ -531,6 +532,12 @@ internal class AgentLocalTools(
         )
     }
 
+    private fun recordAutomationDisplayFailure(detail: AutomationDisplayFailureDetail) {
+        io.github.mangi.eta.agent.automation.AgentTaskDiagnostics.recordDisplayFailureDetailForRun(
+            context, browserRunId, detail,
+        )
+    }
+
     private fun prepareAutomationDisplay(): ToolExecutionDecision.Reject? {
         checkCancellation()
         if (!virtualDisplayEnabled()) {
@@ -559,10 +566,14 @@ internal class AgentLocalTools(
             )
         }
         var typedFailureReported = false
-        val acquired = VirtualDisplayController.acquireAutomationDisplay(context, rootAvailable) { reason ->
-            typedFailureReported = true
-            recordAutomationDisplayFailure(reason)
-        } ?: run {
+        val acquired = VirtualDisplayController.acquireAutomationDisplay(
+            context = context,
+            rootAvailable = rootAvailable,
+            onFailureDetail = { detail ->
+                typedFailureReported = true
+                recordAutomationDisplayFailure(detail)
+            },
+        ) ?: run {
             if (!typedFailureReported) recordAutomationDisplayFailure(AutomationDisplayFailure.DISPLAY_UNAVAILABLE)
             return ToolExecutionDecision.Reject(
                 "AUTOMATION_VIRTUAL_DISPLAY_UNAVAILABLE", "独立虚拟屏不可用或已被占用；本次未操作主屏，请检查 Root、系统兼容性或关闭已有虚拟屏",

@@ -64,6 +64,15 @@
     <string name="automation_task_prompt_label">任务描述</string>
     <string name="automation_export_cancelled">已取消导出。</string>
     <string name="automation_export_diagnostics">导出诊断包</string>
+    <string name="automation_export_diagnostics_full">导出完整诊断包</string>
+    <string name="automation_export_diagnostics_redacted">导出脱敏诊断包</string>
+    <string name="automation_export_full_capture_enabled">采集此任务的完整诊断</string>
+    <string name="automation_export_full_capture_summary">默认开启。记录此任务的名称和提示词、模型与工具请求/结果、最终回复及失败详情。关闭后会停止后续采集并清除此任务已存储的完整详情；不会补录旧记录。每次运行在认领时固定采集模式：运行开始后才开启完整采集，要到下一次运行才生效；关闭会立即停止当前采集，之后重新开启也不会恢复已开始的运行。</string>
+    <string name="automation_export_full_capture_loading">正在读取此任务的完整诊断设置…</string>
+    <string name="automation_export_full_capture_load_failed">无法读取此任务的完整诊断设置。请重新打开任务详情后重试。</string>
+    <string name="automation_export_full_capture_save_failed">无法更新完整诊断设置，请重试。</string>
+    <string name="automation_export_full_capture_cleanup_pending">完整采集已关闭，旧完整详情正在等待重试清理，无法导出。</string>
+    <string name="automation_export_full_capture_warning">完整诊断包可能包含私密或敏感文本，包括自由文本形式的任务、模型和工具内容。会排除专门的认证与签名密钥，但文本过滤无法保证移除所有秘密。仅用于私人排查，不会自动上传。</string>
     <string name="automation_export_failed">无法导出诊断包。请检查可用存储空间后重试。</string>
     <string name="automation_export_picking">请选择诊断包的保存位置…</string>
     <string name="automation_export_privacy">ZIP 文件默认不包含任务提示词、回复内容、账单数据、截图、凭据或通知内容。可能包含运行时间等操作元数据。文件仅保存在本地，不会上传。</string>

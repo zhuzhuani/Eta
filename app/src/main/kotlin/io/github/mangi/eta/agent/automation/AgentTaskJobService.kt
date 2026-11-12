@@ -134,6 +134,7 @@ internal class AgentTaskJobService : JobService() {
                     activeRunId = run.id
                     cancelRetryNotification()
                     AgentTaskScheduler.register(run.id, task.id)
+                    AgentTaskDiagnostics.registerFullCaptureRun(this@AgentTaskJobService, task.id, run.id)
                     AgentTaskDiagnostics.recordScheduleObserved(
                         this@AgentTaskJobService, task.id, run.id, run.fireKey, claimedAt,
                         dispatchState["charging"], dispatchState["unlocked"],
@@ -189,6 +190,29 @@ internal class AgentTaskJobService : JobService() {
                             ).toJson(),
                         )
                     )
+                    AgentTaskDiagnostics.recordFullRunContext(
+                        context = this@AgentTaskJobService,
+                        taskId = task.id,
+                        runId = run.id,
+                        taskName = task.name,
+                        taskPrompt = task.prompt,
+                        runtimePrompt = request.prompt,
+                        model = config.model,
+                        modelParameters = JSONObject()
+                            .put("contextWindow", config.contextWindow ?: JSONObject.NULL)
+                            .put("openAiEndpointMode", config.openAiEndpointMode)
+                            .put("hostedWebSearchEnabled", config.hostedWebSearchEnabled)
+                            .put("terminalTools", config.terminalTools)
+                            .put("browserTools", config.browserTools)
+                            .put("deviceDirectTools", config.deviceDirectTools)
+                            .put("deviceSensitiveReadTools", config.deviceSensitiveReadTools)
+                            .put("deviceSensitiveActionTools", config.deviceSensitiveActionTools)
+                            .put("thinkingEnabled", config.thinkingEnabled)
+                            .put("reasoningEffort", config.reasoningEffort?.name ?: JSONObject.NULL)
+                            .put("autoCompactionEnabled", config.autoCompactionEnabled)
+                            .put("subagentTools", config.subagentTools),
+                    )
+                    AgentTaskDiagnostics.recordDeviceState(this@AgentTaskJobService, task.id, run.id)
                     // Close the claim/register/start gap locally; Runtime repeats this at
                     // serialized admission so an early cancel IPC is never the only signal.
                     if (!AgentTaskScheduler.canDispatch(this@AgentTaskJobService, run.id)) {
@@ -323,7 +347,10 @@ internal class AgentTaskJobService : JobService() {
                 }
                 if (!stopped.get()) AndroidAgentLogger.warn("Automation job failed: type=${error.safeLogType()}")
             } finally {
-                activeRunId?.let(AgentTaskScheduler::unregister)
+                activeRunId?.let { runId ->
+                    AgentTaskScheduler.unregister(runId)
+                    AgentTaskDiagnostics.unregisterFullCaptureRun(runId)
+                }
                 activeRunId = null
                 if (android.os.Build.VERSION.SDK_INT < 34) getSystemService(NotificationManager::class.java).cancel(
                     NOTIFICATION_ID

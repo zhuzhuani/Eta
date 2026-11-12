@@ -684,8 +684,14 @@ internal object AgentTaskDiagnostics {
             val (events, truncated, hasLog) = synchronized(stateLock) {
                 val directory = appContext.getDir(DIRECTORY, Context.MODE_PRIVATE)
                 val logFile = File(directory, taskKey + FILE_SUFFIX)
-                val root = readRoot(AtomicFile(logFile), logFile)
-                Triple(root.optJSONArray("events") ?: JSONArray(), root.optBoolean("truncated", false), logFile.isFile)
+                // Do not construct AtomicFile for a missing log: some implementations create
+                // the base file even when the caller only intends to read it.
+                if (!logFile.exists() && !File(logFile.path + ".bak").exists()) {
+                    Triple(JSONArray(), false, false)
+                } else {
+                    val root = readRoot(AtomicFile(logFile), logFile)
+                    Triple(root.optJSONArray("events") ?: JSONArray(), root.optBoolean("truncated", false), logFile.isFile)
+                }
             }
             val projectedEvents = projectStoredEvents(events)
             val manifest = manifest(

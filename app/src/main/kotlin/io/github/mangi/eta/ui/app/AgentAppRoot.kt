@@ -762,7 +762,12 @@ fun AgentAppRoot(
                 )
             }
             entry<AppRoute.Tasks>(swipeDismiss = swipeDismiss) {
-                AgentTasksScreen(onBack = ::popRoute)
+                AgentTasksScreen(onBack = ::popRoute, onOpenTask = { taskId ->
+                    if (navigator.current() == AppRoute.Tasks) pushRoute(AppRoute.TaskDetail(taskId))
+                })
+            }
+            entry<AppRoute.TaskDetail>(swipeDismiss = swipeDismiss) { route ->
+                AgentTasksScreen(taskId = route.taskId, onBack = ::popRoute)
             }
             entry<AppRoute.LinuxEnvironment>(swipeDismiss = swipeDismiss) {
                 LinuxEnvironmentScreen(

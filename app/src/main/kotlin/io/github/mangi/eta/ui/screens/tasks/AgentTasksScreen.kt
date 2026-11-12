@@ -10,13 +10,10 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.runtime.Composable
@@ -72,8 +69,6 @@ import org.json.JSONObject
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
 import top.yukonga.miuix.kmp.basic.Icon
 import top.yukonga.miuix.kmp.basic.Text
-import top.yukonga.miuix.kmp.icon.MiuixIcons
-import top.yukonga.miuix.kmp.icon.basic.ArrowRight
 import top.yukonga.miuix.kmp.theme.MiuixTheme
 
 private val taskDiagnosticsExportMutex = Mutex()
@@ -85,7 +80,11 @@ private fun TaskPreferenceGroup(content: @Composable () -> Unit) {
 }
 
 @Composable
-internal fun AgentTasksScreen(onBack: () -> Unit) {
+internal fun AgentTasksScreen(
+    onBack: () -> Unit,
+    taskId: String? = null,
+    onOpenTask: ((String) -> Unit)? = null,
+) {
     val context = LocalContext.current.applicationContext
     val dao = remember { EtaDatabase.get(context).agentTaskDao() }
     val tasks by dao.observeTasks().collectAsState(initial = emptyList())
@@ -95,7 +94,7 @@ internal fun AgentTasksScreen(onBack: () -> Unit) {
     var selectedTrigger by remember { mutableStateOf<TaskTriggerUi?>(null) }
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     var notice by remember { mutableStateOf<String?>(null) }
-    var openedTaskId by remember { mutableStateOf<String?>(null) }
+    var openedTaskId by rememberSaveable(taskId) { mutableStateOf(taskId) }
     var pendingExportTaskId by rememberSaveable { mutableStateOf<String?>(null) }
     var pendingExportIncludeSensitive by rememberSaveable { mutableStateOf<Boolean?>(null) }
     var pendingExportUri by rememberSaveable { mutableStateOf<String?>(null) }
@@ -260,7 +259,9 @@ internal fun AgentTasksScreen(onBack: () -> Unit) {
         }
     }
     val openedTask = openedTaskId?.let { id -> tasks.firstOrNull { it.id == id } }
-    if (openedTask != null) {
+    if (taskId != null && openedTask == null) {
+        MiuixScaffoldPage(title = stringResource(R.string.automation_title), onBack = onBack) {}
+    } else if (openedTask != null) {
         AgentTaskDetailPage(
             context = context,
             task = openedTask,
@@ -279,7 +280,7 @@ internal fun AgentTasksScreen(onBack: () -> Unit) {
             onExport = { requestExport(openedTask.id, fullCaptureEnabled) },
             onBack = {
                 captureSettingOperationId += 1
-                openedTaskId = null
+                if (taskId != null) onBack() else openedTaskId = null
             },
             onEnabledChange = { enabled ->
                 execute(
@@ -293,7 +294,7 @@ internal fun AgentTasksScreen(onBack: () -> Unit) {
             onDelete = {
                 execute("tasks_delete", JSONObject().put("taskId", openedTask.id)) {
                     captureSettingOperationId += 1
-                    openedTaskId = null
+                    if (taskId != null) onBack() else openedTaskId = null
                 }
             },
         )
@@ -304,10 +305,17 @@ internal fun AgentTasksScreen(onBack: () -> Unit) {
         ) {
             item {
                 TaskPreferenceGroup {
-                    ArrowPreference(
-                        title = stringResource(R.string.automation_create_hint),
-                        summary = stringResource(R.string.automation_create_summary),
-                    )
+                    Column(
+                        modifier = Modifier.fillMaxWidth().padding(16.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        Text(stringResource(R.string.automation_create_hint), style = MiuixTheme.textStyles.body2)
+                        Text(
+                            stringResource(R.string.automation_create_summary),
+                            style = MiuixTheme.textStyles.footnote1,
+                            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+                        )
+                    }
                 }
             }
             item(key = "trigger-catalog-heading") {
@@ -335,7 +343,7 @@ internal fun AgentTasksScreen(onBack: () -> Unit) {
                     ArrowPreference(
                         title = task.name,
                         summary = triggerSummary(context, rule),
-                        onClick = { openedTaskId = task.id },
+                        onClick = { if (onOpenTask != null) onOpenTask(task.id) else openedTaskId = task.id },
                         endActions = {
                             Row(verticalAlignment = Alignment.CenterVertically) {
                                 Switch(
@@ -348,13 +356,6 @@ internal fun AgentTasksScreen(onBack: () -> Unit) {
                                                 .put("enabled", enabled),
                                         )
                                     },
-                                )
-                                Spacer(Modifier.width(8.dp))
-                                Icon(
-                                    imageVector = MiuixIcons.Basic.ArrowRight,
-                                    contentDescription = null,
-                                    modifier = Modifier.size(8.dp, 14.dp),
-                                    tint = MiuixTheme.colorScheme.onBackground.copy(alpha = 0.3f),
                                 )
                             }
                         },

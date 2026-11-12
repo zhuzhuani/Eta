@@ -76,6 +76,9 @@ sealed interface AppRoute : NavKey {
     data object Tasks : AppRoute
 
     @Serializable
+    data class TaskDetail(val taskId: String) : AppRoute
+
+    @Serializable
     data object LinuxEnvironment : AppRoute
 
     @Serializable

@@ -5,6 +5,7 @@ import android.content.res.Configuration
 import io.github.mangi.eta.R
 import java.util.Locale
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -90,6 +91,27 @@ class LocaleResourcesTest {
         assertEquals("Monitoring task triggers", localizedString("en-US", R.string.automation_monitor_title))
         assertEquals("正在监控任务触发器", localizedString("zh-CN", R.string.automation_monitor_title))
         assertEquals("正在監控任務觸發器", localizedString("zh-TW", R.string.automation_monitor_title))
+        assertEquals("Export diagnostic ZIP", localizedString("en-US", R.string.automation_export_diagnostics))
+        assertEquals("导出诊断包", localizedString("zh-CN", R.string.automation_export_diagnostics))
+        assertEquals("匯出診斷套件", localizedString("zh-TW", R.string.automation_export_diagnostics))
+        assertEquals("Export cancelled.", localizedString("en-US", R.string.automation_export_cancelled))
+        assertEquals("已取消导出。", localizedString("zh-CN", R.string.automation_export_cancelled))
+        assertEquals("已取消匯出。", localizedString("zh-TW", R.string.automation_export_cancelled))
+        assertEquals("Choose where to save the diagnostic ZIP…", localizedString("en-US", R.string.automation_export_picking))
+        assertEquals("请选择诊断包的保存位置…", localizedString("zh-CN", R.string.automation_export_picking))
+        assertEquals("請選擇診斷套件的儲存位置…", localizedString("zh-TW", R.string.automation_export_picking))
+        assertEquals("Exporting diagnostic ZIP…", localizedString("en-US", R.string.automation_export_running))
+        assertEquals("正在导出诊断包…", localizedString("zh-CN", R.string.automation_export_running))
+        assertEquals("正在匯出診斷套件…", localizedString("zh-TW", R.string.automation_export_running))
+        assertEquals("Diagnostic ZIP saved.", localizedString("en-US", R.string.automation_export_succeeded))
+        assertEquals("诊断包已保存。", localizedString("zh-CN", R.string.automation_export_succeeded))
+        assertEquals("診斷套件已儲存。", localizedString("zh-TW", R.string.automation_export_succeeded))
+        assertEquals("Couldn’t export the diagnostic ZIP. Check available storage and try again.", localizedString("en-US", R.string.automation_export_failed))
+        assertEquals("无法导出诊断包。请检查可用存储空间后重试。", localizedString("zh-CN", R.string.automation_export_failed))
+        assertEquals("無法匯出診斷套件。請檢查可用儲存空間後重試。", localizedString("zh-TW", R.string.automation_export_failed))
+        assertTrue(localizedString("en-US", R.string.automation_export_privacy).contains("not uploaded"))
+        assertTrue(localizedString("zh-CN", R.string.automation_export_privacy).contains("不会上传"))
+        assertTrue(localizedString("zh-TW", R.string.automation_export_privacy).contains("不會上傳"))
     }
 
     @Suppress("DEPRECATION")

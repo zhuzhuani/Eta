@@ -62,6 +62,13 @@
     <string name="automation_task_enabled">啟用此任務</string>
     <string name="automation_task_enabled_summary">關閉後規則保留，不再自動觸發</string>
     <string name="automation_task_prompt_label">任務描述</string>
+    <string name="automation_export_cancelled">已取消匯出。</string>
+    <string name="automation_export_diagnostics">匯出診斷套件</string>
+    <string name="automation_export_failed">無法匯出診斷套件。請檢查可用儲存空間後重試。</string>
+    <string name="automation_export_picking">請選擇診斷套件的儲存位置…</string>
+    <string name="automation_export_privacy">ZIP 檔案預設不包含任務提示詞、回覆內容、帳單資料、螢幕截圖、憑證或通知內容。可能包含執行時間等操作中繼資料。檔案僅儲存在本機，不會上傳。</string>
+    <string name="automation_export_running">正在匯出診斷套件…</string>
+    <string name="automation_export_succeeded">診斷套件已儲存。</string>
     <string name="automation_title">自動任務</string>
     <string name="automation_tool_cancel">取消自動任務</string>
     <string name="automation_tool_create">創建自動任務</string>

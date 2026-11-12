@@ -45,6 +45,7 @@ internal class AgentTaskTools(context: Context) {
                     if (task.enabled) AgentTaskScheduler.requireTriggerAvailable(context, rule)
                     require(task.nextRunAt == null || task.nextRunAt > now) { "首次时间需要在未来" }
                     dao.insertTask(task)
+                    AgentTaskDiagnostics.recordSchedulePlanned(context, task.id, task.triggerJson)
                     AgentTaskScheduler.refresh(context)
                     describe(task)
                 }
@@ -101,6 +102,9 @@ internal class AgentTaskTools(context: Context) {
                         require(changed.nextRunAt == null || changed.nextRunAt > now) { "首次时间需要在未来" }
                     }
                     require(dao.revise(changed, old.updatedAt)) { "任务已变化，请重新读取后更新" }
+                    if (changed.enabled && (args.has("trigger") || !old.enabled)) {
+                        AgentTaskDiagnostics.recordSchedulePlanned(context, changed.id, changed.triggerJson)
+                    }
                     if (!changed.enabled) AgentTaskScheduler.cancelRunning(context, old.id)
                     AgentTaskScheduler.refresh(context)
                     describe(dao.task(old.id) ?: changed)

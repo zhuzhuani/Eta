@@ -74,11 +74,16 @@ internal object AgentTaskScheduler {
         val runIds = runBlocking(Dispatchers.IO) {
             dao.requestCancellation(taskId, System.currentTimeMillis())
         }
+        AgentTaskDiagnostics.recordCancelRequested(context.applicationContext, taskId, runIds)
         runIds.forEach { id ->
             cancellationWorker.execute {
                 AgentRuntimeClient(context, AndroidAgentLogger).cancelRun(id)
             }
         }
+    }
+
+    fun taskIdForRun(context: Context, runId: String): String? = runBlocking(Dispatchers.IO) {
+        EtaDatabase.get(context.applicationContext).agentTaskDao().run(runId)?.taskId
     }
 
     /** Runtime admission API: blocking wrapper safe for its serialized binder/main admission path. */
@@ -87,7 +92,10 @@ internal object AgentTaskScheduler {
         val run = dao.run(runId) ?: return@runBlocking false
         if (run.status != "running" || run.cancelRequested) return@runBlocking false
         val task = dao.task(run.taskId) ?: return@runBlocking false
-        AgentTaskRules.conditionsMatch(JSONObject(task.triggerJson), state(context.applicationContext))
+        val currentState = state(context.applicationContext)
+        val conditionsMatch = AgentTaskRules.conditionsMatch(JSONObject(task.triggerJson), currentState)
+        AgentTaskDiagnostics.recordConditionCheck(context.applicationContext, task.id, currentState, conditionsMatch, runId)
+        conditionsMatch
     }
 
     suspend fun nextEligibleQueued(
@@ -98,9 +106,9 @@ internal object AgentTaskScheduler {
         val tasks = dao.tasks().associateBy { it.id }
         for (run in dao.queuedRuns(100)) {
             val task = tasks[run.taskId] ?: continue
-            if (AgentTaskRules.conditionsMatch(JSONObject(task.triggerJson), currentState)) {
-                return run to task
-            }
+            val matches = AgentTaskRules.conditionsMatch(JSONObject(task.triggerJson), currentState)
+            AgentTaskDiagnostics.recordConditionCheck(context, task.id, currentState, matches, run.id)
+            if (matches) return run to task
         }
         return null
     }
@@ -194,17 +202,21 @@ internal object AgentTaskScheduler {
         dao.tasks().filter { it.enabled && it.nextRunAt?.let { due -> due <= now } == true }
             .forEach { task ->
                 val rule = JSONObject(task.triggerJson)
-                if (AgentTaskRules.conditionsMatch(rule, state)) {
-                    dao.enqueue(
-                        task,
-                        AgentTaskRunEntity(
-                            UUID.randomUUID().toString(),
-                            task.id,
-                            "time:${task.nextRunAt}",
-                            queuedAt = now
-                        ),
-                        AgentTaskRules.nextTime(rule, now, false)
+                val matches = AgentTaskRules.conditionsMatch(rule, state)
+                AgentTaskDiagnostics.recordConditionCheck(context, task.id, state, matches)
+                if (matches) {
+                    val run = AgentTaskRunEntity(
+                        UUID.randomUUID().toString(),
+                        task.id,
+                        "time:${task.nextRunAt}",
+                        queuedAt = now,
                     )
+                    if (dao.enqueue(task, run, AgentTaskRules.nextTime(rule, now, false))) {
+                        AgentTaskDiagnostics.recordScheduleObserved(
+                            context, task.id, run.id, run.fireKey, now,
+                            state["charging"], state["unlocked"], state["networkConnected"] == true, true,
+                        )
+                    }
                 } else {
                     // 保留原定时点用于去重；稍后由普通调度再检查条件，不提前执行。
                     requestJob(context, 15 * 60_000)
@@ -219,8 +231,19 @@ internal object AgentTaskScheduler {
             "manual:${UUID.randomUUID()}",
             queuedAt = System.currentTimeMillis()
         )
-        EtaDatabase.get(context).agentTaskDao().enqueue(task, run, task.nextRunAt, manual = true)
-            .also { if (it) requestJob(context) }
+        val state = state(context)
+        val conditionsSatisfied = AgentTaskRules.conditionsMatch(JSONObject(task.triggerJson), state)
+        AgentTaskDiagnostics.recordConditionCheck(context, task.id, state, conditionsSatisfied, run.id)
+        val queued = EtaDatabase.get(context).agentTaskDao().enqueue(task, run, task.nextRunAt, manual = true)
+        if (queued) {
+            AgentTaskDiagnostics.recordScheduleObserved(
+                context, task.id, run.id, run.fireKey, run.queuedAt,
+                state["charging"], state["unlocked"], state["networkConnected"] == true,
+                conditionsSatisfied,
+            )
+            requestJob(context)
+        }
+        queued
     }
 
     fun publish(context: Context, type: String, key: String, data: JSONObject = JSONObject()) {
@@ -243,30 +266,26 @@ internal object AgentTaskScheduler {
                                 "task_failed"
                             ) && rule.optJSONObject("filters")?.optString("taskId").isNullOrBlank()
                         ) return@forEach
-                        if (AgentTaskRules.matches(
-                                rule,
-                                type,
-                                copy
-                            ) && AgentTaskRules.conditionsMatch(rule, state)
-                        ) {
+                        val triggerMatches = AgentTaskRules.matches(rule, type, copy)
+                        val conditionsMatch = AgentTaskRules.conditionsMatch(rule, state)
+                        if (triggerMatches) AgentTaskDiagnostics.recordConditionCheck(context, task.id, state, conditionsMatch)
+                        if (triggerMatches && conditionsMatch) {
                             val event = JSONObject().put("type", type)
-                            for (field in listOf(
-                                "packageName",
-                                "taskId",
-                                "transport"
-                            )) if (copy.has(field)) event.put(
-                                field,
-                                copy.optString(field).take(200)
+                            for (field in listOf("packageName", "taskId", "transport")) {
+                                if (copy.has(field)) event.put(field, copy.optString(field).take(200))
+                            }
+                            val run = AgentTaskRunEntity(
+                                UUID.randomUUID().toString(), task.id, "$type:${key.take(200)}",
+                                eventJson = event.toString(), queuedAt = now,
                             )
-                            queued = dao.enqueue(
-                                task, AgentTaskRunEntity(
-                                    UUID.randomUUID().toString(),
-                                    task.id,
-                                    "$type:${key.take(200)}",
-                                    eventJson = event.toString(),
-                                    queuedAt = now
-                                ), null
-                            ) || queued
+                            val enqueued = dao.enqueue(task, run, null)
+                            if (enqueued) {
+                                AgentTaskDiagnostics.recordScheduleObserved(
+                                    appContext, task.id, run.id, run.fireKey, now,
+                                    state["charging"], state["unlocked"], state["networkConnected"] == true, true,
+                                )
+                            }
+                            queued = enqueued || queued
                         }
                     }
                     if (queued) requestJob(appContext)

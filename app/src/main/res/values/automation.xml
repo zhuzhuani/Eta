@@ -62,6 +62,13 @@
     <string name="automation_task_enabled">Enable this task</string>
     <string name="automation_task_enabled_summary">When off, the rule is kept but will not trigger automatically</string>
     <string name="automation_task_prompt_label">Task description</string>
+    <string name="automation_export_cancelled">Export cancelled.</string>
+    <string name="automation_export_diagnostics">Export diagnostic ZIP</string>
+    <string name="automation_export_failed">Couldn’t export the diagnostic ZIP. Check available storage and try again.</string>
+    <string name="automation_export_picking">Choose where to save the diagnostic ZIP…</string>
+    <string name="automation_export_privacy">The ZIP excludes task prompts, response content, billing data, screenshots, credentials, and notification content. It may include run timestamps and other operational metadata. The file is saved locally and is not uploaded.</string>
+    <string name="automation_export_running">Exporting diagnostic ZIP…</string>
+    <string name="automation_export_succeeded">Diagnostic ZIP saved.</string>
     <string name="automation_title">Scheduled tasks</string>
     <string name="automation_tool_cancel">Cancel task execution</string>
     <string name="automation_tool_create">Create scheduled task</string>

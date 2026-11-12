@@ -1,6 +1,9 @@
 package io.github.mangi.eta.ui.screens.tasks
 
 import android.content.Context
+import android.net.Uri
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -27,6 +30,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -36,6 +40,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import io.github.mangi.eta.R
+import io.github.mangi.eta.agent.automation.AgentTaskDiagnostics
 import io.github.mangi.eta.agent.automation.AgentTaskScheduler
 import io.github.mangi.eta.agent.automation.AgentTaskTools
 import io.github.mangi.eta.data.db.AgentTaskEntity
@@ -55,8 +60,13 @@ import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
 import java.time.format.TextStyle
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
 import top.yukonga.miuix.kmp.basic.ButtonDefaults
@@ -65,6 +75,8 @@ import top.yukonga.miuix.kmp.basic.Text
 import top.yukonga.miuix.kmp.icon.MiuixIcons
 import top.yukonga.miuix.kmp.icon.basic.ArrowRight
 import top.yukonga.miuix.kmp.theme.MiuixTheme
+
+private val taskDiagnosticsExportMutex = Mutex()
 
 @Composable
 private fun TaskPreferenceGroup(content: @Composable () -> Unit) {
@@ -83,6 +95,61 @@ internal fun AgentTasksScreen(onBack: () -> Unit) {
     val lifecycle = LocalLifecycleOwner.current.lifecycle
     var notice by remember { mutableStateOf<String?>(null) }
     var openedTaskId by remember { mutableStateOf<String?>(null) }
+    var pendingExportTaskId by rememberSaveable { mutableStateOf<String?>(null) }
+    var pendingExportUri by rememberSaveable { mutableStateOf<String?>(null) }
+    var exportStatusId by rememberSaveable { mutableStateOf<Int?>(null) }
+    val exportLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/zip"),
+    ) { uri ->
+        if (uri == null || pendingExportTaskId == null) {
+            pendingExportTaskId = null
+            pendingExportUri = null
+            exportStatusId = R.string.automation_export_cancelled
+        } else {
+            pendingExportUri = uri.toString()
+            exportStatusId = R.string.automation_export_running
+        }
+    }
+    LaunchedEffect(pendingExportTaskId, pendingExportUri) {
+        val taskId = pendingExportTaskId
+        val uriText = pendingExportUri
+        if (taskId != null && uriText != null) {
+            val exported = try {
+                taskDiagnosticsExportMutex.withLock {
+                    currentCoroutineContext().ensureActive()
+                    withContext(Dispatchers.IO) {
+                        currentCoroutineContext().ensureActive()
+                        val output = context.contentResolver.openOutputStream(Uri.parse(uriText), "wt")
+                            ?: error("Unable to open destination")
+                        output.use { AgentTaskDiagnostics.export(context, taskId, it) }
+                    }
+                }
+                true
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Throwable) {
+                false
+            }
+            exportStatusId = if (exported) {
+                R.string.automation_export_succeeded
+            } else {
+                R.string.automation_export_failed
+            }
+            pendingExportTaskId = null
+            pendingExportUri = null
+        }
+    }
+    fun requestExport(taskId: String) {
+        if (pendingExportTaskId != null) return
+        pendingExportTaskId = taskId
+        exportStatusId = R.string.automation_export_picking
+        runCatching { exportLauncher.launch("eta-task-diagnostics.zip") }
+            .onFailure {
+                pendingExportTaskId = null
+                pendingExportUri = null
+                exportStatusId = R.string.automation_export_failed
+            }
+    }
     fun execute(tool: String, args: JSONObject, onSuccess: (() -> Unit)? = null) {
         scope.launch(Dispatchers.IO) {
             val result = JSONObject(AgentTaskTools(context).execute(tool, args))
@@ -112,6 +179,9 @@ internal fun AgentTasksScreen(onBack: () -> Unit) {
             task = openedTask,
             recentRuns = runs.filter { it.taskId == openedTask.id }.take(3),
             notice = notice,
+            exportStatusId = exportStatusId,
+            isExportPending = pendingExportTaskId != null,
+            onExport = { requestExport(openedTask.id) },
             onBack = { openedTaskId = null },
             onEnabledChange = { enabled ->
                 execute(
@@ -203,6 +273,9 @@ private fun AgentTaskDetailPage(
     task: AgentTaskEntity,
     recentRuns: List<AgentTaskRunEntity>,
     notice: String?,
+    exportStatusId: Int?,
+    isExportPending: Boolean,
+    onExport: () -> Unit,
     onBack: () -> Unit,
     onEnabledChange: (Boolean) -> Unit,
     onRun: () -> Unit,
@@ -330,6 +403,37 @@ private fun AgentTaskDetailPage(
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+        item(key = "task-export") {
+            TaskPreferenceGroup {
+                Column(
+                    modifier = Modifier.fillMaxWidth().padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp),
+                ) {
+                    Text(
+                        text = stringResource(R.string.automation_export_privacy),
+                        style = MiuixTheme.textStyles.footnote1,
+                        color = colors.onSurfaceVariantSummary,
+                    )
+                    TextButton(
+                        text = stringResource(R.string.automation_export_diagnostics),
+                        onClick = onExport,
+                        enabled = !isExportPending,
+                        modifier = Modifier.fillMaxWidth(),
+                        minHeight = 48.dp,
+                        colors = ButtonDefaults.textButtonColorsPrimary(),
+                        textStyle = MiuixTheme.textStyles.body2,
+                    )
+                    exportStatusId?.let { statusId ->
+                        Text(
+                            text = stringResource(statusId),
+                            style = MiuixTheme.textStyles.footnote1,
+                            color = if (statusId == R.string.automation_export_failed) colors.error
+                                else colors.onSurfaceVariantSummary,
+                        )
                     }
                 }
             }

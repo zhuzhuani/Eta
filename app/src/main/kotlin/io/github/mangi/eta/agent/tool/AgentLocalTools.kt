@@ -31,6 +31,7 @@ import io.github.mangi.eta.agent.runtime.AgentAppContext
 import io.github.mangi.eta.agent.runtime.AgentRunCancelledException
 import io.github.mangi.eta.agent.runtime.GuiControlCoordinator
 import io.github.mangi.eta.agent.virtualdisplay.CanvasRoutingPolicy
+import io.github.mangi.eta.agent.virtualdisplay.AutomationDisplayFailure
 import io.github.mangi.eta.agent.virtualdisplay.VirtualDisplayController
 import io.github.mangi.eta.agent.skill.SkillCompatibilityChecker
 import io.github.mangi.eta.agent.skill.SkillIndexService
@@ -508,40 +509,84 @@ internal class AgentLocalTools(
         )
     }
 
+    private fun recordAutomationDisplayFailure(reason: AutomationDisplayFailure) {
+        val safeReason = when (reason) {
+            AutomationDisplayFailure.VIRTUAL_DISPLAY_OCCUPIED ->
+                io.github.mangi.eta.agent.automation.AgentTaskDiagnostics.DisplayFailure.VIRTUAL_DISPLAY_OCCUPIED
+            AutomationDisplayFailure.ROOT_BRIDGE_FAILED ->
+                io.github.mangi.eta.agent.automation.AgentTaskDiagnostics.DisplayFailure.ROOT_BRIDGE_FAILED
+            AutomationDisplayFailure.ROOT_UNAVAILABLE ->
+                io.github.mangi.eta.agent.automation.AgentTaskDiagnostics.DisplayFailure.ROOT_UNAVAILABLE
+            AutomationDisplayFailure.VIRTUAL_DISPLAY_DISABLED ->
+                io.github.mangi.eta.agent.automation.AgentTaskDiagnostics.DisplayFailure.VIRTUAL_DISPLAY_DISABLED
+            AutomationDisplayFailure.DISPLAY_UNSUPPORTED ->
+                io.github.mangi.eta.agent.automation.AgentTaskDiagnostics.DisplayFailure.DISPLAY_UNSUPPORTED
+            AutomationDisplayFailure.DISPLAY_UNAVAILABLE ->
+                io.github.mangi.eta.agent.automation.AgentTaskDiagnostics.DisplayFailure.DISPLAY_UNAVAILABLE
+            AutomationDisplayFailure.DISPLAY_LOST ->
+                io.github.mangi.eta.agent.automation.AgentTaskDiagnostics.DisplayFailure.DISPLAY_LOST
+        }
+        io.github.mangi.eta.agent.automation.AgentTaskDiagnostics.recordDisplayFailureForRun(
+            context, browserRunId, safeReason,
+        )
+    }
+
     private fun prepareAutomationDisplay(): ToolExecutionDecision.Reject? {
         checkCancellation()
-        if (!virtualDisplayEnabled()) return ToolExecutionDecision.Reject(
-            "AUTOMATION_VIRTUAL_DISPLAY_DISABLED", "请先开启 Eta 虚拟屏；自动任务不会回退到主屏",
-        )
-        if (!rootAvailable()) return ToolExecutionDecision.Reject(
-            "AUTOMATION_ROOT_REQUIRED", "自动任务的后台 GUI 需要已授予 Root 权限；本次未操作主屏",
-        )
-        if (!CanvasRoutingPolicy.supportsBackgroundDisplay(android.os.Build.VERSION.SDK_INT)) return ToolExecutionDecision.Reject(
-            "AUTOMATION_DISPLAY_UNSUPPORTED", "后台 GUI 需要 Android 14 或以上版本",
-        )
+        if (!virtualDisplayEnabled()) {
+            recordAutomationDisplayFailure(AutomationDisplayFailure.VIRTUAL_DISPLAY_DISABLED)
+            return ToolExecutionDecision.Reject(
+                "AUTOMATION_VIRTUAL_DISPLAY_DISABLED", "请先开启 Eta 虚拟屏；自动任务不会回退到主屏",
+            )
+        }
+        if (!rootAvailable()) {
+            recordAutomationDisplayFailure(AutomationDisplayFailure.ROOT_UNAVAILABLE)
+            return ToolExecutionDecision.Reject(
+                "AUTOMATION_ROOT_REQUIRED", "自动任务的后台 GUI 需要已授予 Root 权限；本次未操作主屏",
+            )
+        }
+        if (!CanvasRoutingPolicy.supportsBackgroundDisplay(android.os.Build.VERSION.SDK_INT)) {
+            recordAutomationDisplayFailure(AutomationDisplayFailure.DISPLAY_UNSUPPORTED)
+            return ToolExecutionDecision.Reject(
+                "AUTOMATION_DISPLAY_UNSUPPORTED", "后台 GUI 需要 Android 14 或以上版本",
+            )
+        }
         val previous = automationDisplay.get()
-        if (previous != null) return if (previous.isValid()) null else ToolExecutionDecision.Reject(
-            "AUTOMATION_DISPLAY_LOST", "本次自动任务的虚拟屏已失效，请重新触发任务；不会切回主屏或重建后重放动作",
-        )
-        val acquired = VirtualDisplayController.acquireAutomationDisplay(context, rootAvailable)
-            ?: return ToolExecutionDecision.Reject(
+        if (previous != null) return if (previous.isValid()) null else {
+            recordAutomationDisplayFailure(AutomationDisplayFailure.DISPLAY_LOST)
+            ToolExecutionDecision.Reject(
+                "AUTOMATION_DISPLAY_LOST", "本次自动任务的虚拟屏已失效，请重新触发任务；不会切回主屏或重建后重放动作",
+            )
+        }
+        var typedFailureReported = false
+        val acquired = VirtualDisplayController.acquireAutomationDisplay(context, rootAvailable) { reason ->
+            typedFailureReported = true
+            recordAutomationDisplayFailure(reason)
+        } ?: run {
+            if (!typedFailureReported) recordAutomationDisplayFailure(AutomationDisplayFailure.DISPLAY_UNAVAILABLE)
+            return ToolExecutionDecision.Reject(
                 "AUTOMATION_VIRTUAL_DISPLAY_UNAVAILABLE", "独立虚拟屏不可用或已被占用；本次未操作主屏，请检查 Root、系统兼容性或关闭已有虚拟屏",
             )
+        }
         if (!automationDisplay.compareAndSet(null, acquired)) acquired.close()
         // Cancellation may have happened during the blocking Root bridge creation.
         if (closed.get() || Thread.currentThread().isInterrupted) {
             automationDisplay.getAndSet(null)?.close()
             throw AgentRunCancelledException()
         }
-        return if (automationDisplay.get()?.isValid() == true) null else ToolExecutionDecision.Reject(
-            "AUTOMATION_DISPLAY_LOST", "独立虚拟屏已失效；本次未操作主屏",
-        )
+        return if (automationDisplay.get()?.isValid() == true) null else {
+            recordAutomationDisplayFailure(AutomationDisplayFailure.DISPLAY_LOST)
+            ToolExecutionDecision.Reject(
+                "AUTOMATION_DISPLAY_LOST", "独立虚拟屏已失效；本次未操作主屏",
+            )
+        }
     }
 
     private fun currentActiveDisplayId(): Int {
         if (automation) {
             val lease = automationDisplay.get()
             if (!virtualDisplayEnabled() || !rootAvailable() || lease?.isValid() != true) {
+                if (automation && lease != null) recordAutomationDisplayFailure(AutomationDisplayFailure.DISPLAY_LOST)
                 publishedObservation.set(PublishedObservation())
                 throw ActiveDisplayUnavailableException()
             }

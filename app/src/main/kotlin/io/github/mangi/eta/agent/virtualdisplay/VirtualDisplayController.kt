@@ -38,6 +38,16 @@ import kotlinx.coroutines.flow.asStateFlow
 import org.json.JSONObject
 import org.lsposed.hiddenapibypass.HiddenApiBypass
 
+internal enum class AutomationDisplayFailure {
+    VIRTUAL_DISPLAY_OCCUPIED,
+    ROOT_BRIDGE_FAILED,
+    ROOT_UNAVAILABLE,
+    VIRTUAL_DISPLAY_DISABLED,
+    DISPLAY_UNSUPPORTED,
+    DISPLAY_UNAVAILABLE,
+    DISPLAY_LOST,
+}
+
 /**
  * 虚拟屏会话与生命周期中枢。
  *
@@ -107,18 +117,31 @@ internal object VirtualDisplayController {
     fun acquireAutomationDisplay(
         context: Context,
         rootAvailable: () -> Boolean,
+        onFailure: (AutomationDisplayFailure) -> Unit = {},
     ): AutomationDisplayLease? {
-        if (!rootAvailable()) return null
+        fun report(reason: AutomationDisplayFailure) {
+            runCatching { onFailure(reason) }
+        }
+        if (!rootAvailable()) {
+            report(AutomationDisplayFailure.ROOT_UNAVAILABLE)
+            return null
+        }
         val appContext = context.applicationContext
         return synchronized(creationLock) {
-            val id = ensureVirtualDisplayInternal(appContext, rootAvailable, automation = true) ?: return null
+            val id = ensureVirtualDisplayInternal(
+                appContext, rootAvailable, automation = true, onAutomationFailure = onFailure,
+            ) ?: return null
             val token = synchronized(lock) {
                 automationToken?.takeIf { current ->
                     sessionState.isCurrent(current) && sessionState.active?.displayId == id
                 }
-            } ?: return null
+            } ?: run {
+                report(AutomationDisplayFailure.DISPLAY_UNAVAILABLE)
+                return null
+            }
             if (!rootAvailable()) {
                 releaseSession(appContext, rootAvailable, token)
+                report(AutomationDisplayFailure.ROOT_UNAVAILABLE)
                 return null
             }
             AutomationDisplayLease(id, { rootAvailable() && isAutomationLeaseCurrent(token, id) }) {
@@ -131,10 +154,20 @@ internal object VirtualDisplayController {
         context: Context,
         rootAvailable: () -> Boolean,
         automation: Boolean,
+        onAutomationFailure: (AutomationDisplayFailure) -> Unit = {},
     ): Int? {
-        if (!CanvasRoutingPolicy.supportsBackgroundDisplay(Build.VERSION.SDK_INT)) return null
+        fun report(reason: AutomationDisplayFailure) {
+            if (automation) runCatching { onAutomationFailure(reason) }
+        }
+        if (!CanvasRoutingPolicy.supportsBackgroundDisplay(Build.VERSION.SDK_INT)) {
+            report(AutomationDisplayFailure.DISPLAY_UNSUPPORTED)
+            return null
+        }
         val appContext = context.applicationContext
-        val manager = appContext.getSystemService(DisplayManager::class.java) ?: return null
+        val manager = appContext.getSystemService(DisplayManager::class.java) ?: run {
+            report(AutomationDisplayFailure.DISPLAY_UNAVAILABLE)
+            return null
+        }
         // 创建可包含 Binder 与 Root 等待；发布状态和释放不等待这把创建锁。
         synchronized(creationLock) {
             val existing = synchronized(lock) {
@@ -142,7 +175,10 @@ internal object VirtualDisplayController {
                 sessionState.active
             }
             if (existing != null) {
-                if (automation) return null
+                if (automation) {
+                    report(AutomationDisplayFailure.VIRTUAL_DISPLAY_OCCUPIED)
+                    return null
+                }
                 val bridge = synchronized(lock) { displayResources?.bridge }
                 if ((bridge == null || bridge.isAlive) && isDisplayUsable(manager, existing.displayId)) {
                     synchronized(lock) {
@@ -158,6 +194,7 @@ internal object VirtualDisplayController {
             var reader: ImageReader? = null
             var inProcessDisplay: VirtualDisplay? = null
             var rootBridge: RootVirtualDisplayBridge? = null
+            var rootBridgeCreationAttempted = false
             var listener: DisplayManager.DisplayListener? = null
             var accepted = false
             try {
@@ -168,6 +205,7 @@ internal object VirtualDisplayController {
                 val handler = Handler(frameWorker.looper)
                 frames.setOnImageAvailableListener(::onFrameAvailable, handler)
                 if (rootAvailable()) {
+                    rootBridgeCreationAttempted = true
                     rootBridge = RootVirtualDisplayBridge.create(
                         appContext, frames.surface, width, height, densityDpi, rootAvailable, automation,
                     ) { process ->
@@ -177,13 +215,22 @@ internal object VirtualDisplayController {
                         if (ownsSession) releaseSession(appContext, rootAvailable, token)
                     }
                 }
-                if (automation && rootBridge == null) return null
+                if (automation && rootBridge == null) {
+                    report(if (rootAvailable()) AutomationDisplayFailure.ROOT_BRIDGE_FAILED else AutomationDisplayFailure.ROOT_UNAVAILABLE)
+                    return null
+                }
                 val id = rootBridge?.displayId ?: run {
-                    if (EtaApp.serviceInstance == null) return null
+                    if (EtaApp.serviceInstance == null) {
+                        report(AutomationDisplayFailure.DISPLAY_UNAVAILABLE)
+                        return null
+                    }
                     inProcessDisplay = tryCreateInProcessVirtualDisplay(
                         appContext, frames.surface, width, height, densityDpi, automation,
                     )
-                    inProcessDisplay?.display?.displayId ?: return null
+                    inProcessDisplay?.display?.displayId ?: run {
+                        report(AutomationDisplayFailure.DISPLAY_UNAVAILABLE)
+                        return null
+                    }
                 }
                 listener = object : DisplayManager.DisplayListener {
                     override fun onDisplayAdded(displayId: Int) = Unit
@@ -197,9 +244,19 @@ internal object VirtualDisplayController {
                     }
                 }
                 manager.registerDisplayListener(listener, handler)
-                if (!isDisplayUsable(manager, id)) return null
+                if (!isDisplayUsable(manager, id)) {
+                    report(AutomationDisplayFailure.DISPLAY_UNAVAILABLE)
+                    return null
+                }
+                if (rootBridge?.isAlive == false) {
+                    report(AutomationDisplayFailure.ROOT_BRIDGE_FAILED)
+                    return null
+                }
                 synchronized(lock) {
-                    if (rootBridge?.isAlive == false || !sessionState.activate(token, id)) return null
+                    if (!sessionState.activate(token, id)) {
+                        report(AutomationDisplayFailure.DISPLAY_UNAVAILABLE)
+                        return null
+                    }
                     displayResources = VirtualDisplaySessionResources(
                         frames, frameWorker, inProcessDisplay, rootBridge, manager, listener,
                     )
@@ -215,6 +272,13 @@ internal object VirtualDisplayController {
                 return id
             } catch (exception: Exception) {
                 AndroidAgentLogger.warn("Virtual display creation failed: type=${exception.safeLogType()}")
+                if (automation) {
+                    report(
+                        if (rootBridgeCreationAttempted && rootBridge == null) AutomationDisplayFailure.ROOT_BRIDGE_FAILED
+                        else if (!rootAvailable()) AutomationDisplayFailure.ROOT_UNAVAILABLE
+                        else AutomationDisplayFailure.DISPLAY_UNAVAILABLE,
+                    )
+                }
                 return null
             } finally {
                 if (!accepted) {

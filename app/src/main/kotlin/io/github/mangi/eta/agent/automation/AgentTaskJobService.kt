@@ -12,6 +12,10 @@ import io.github.mangi.eta.R
 import io.github.mangi.eta.agent.runtime.AgentEvent
 import io.github.mangi.eta.agent.runtime.AgentRuntimeClient
 import io.github.mangi.eta.agent.runtime.AgentRuntimeWire
+import io.github.mangi.eta.agent.runtime.AgentRuntimePolicy
+import io.github.mangi.eta.agent.accessibility.AgentAccessibilityService
+import io.github.mangi.eta.agent.device.RootAccess
+import io.github.mangi.eta.config.Prefs
 import io.github.mangi.eta.agent.runtime.AgentExternalArchivePayload
 import io.github.mangi.eta.core.AndroidAgentLogger
 import io.github.mangi.eta.core.safeLogType
@@ -38,6 +42,8 @@ internal class AgentTaskJobService : JobService() {
             var deferred = false
             var deferredDelay = 60_000L
             var claimedRun: AgentTaskRunEntity? = null
+            var diagnosticTaskId: String? = null
+            var diagnosticRunId: String? = null
             // 失败自愈红线：只要真的执行过工具（动过手机），就不再自动重试。
             val touchedAny = AtomicBoolean(false)
             try {
@@ -56,8 +62,15 @@ internal class AgentTaskJobService : JobService() {
                         return@runBlocking
                     }
                     val (run, task) = candidate
+                    diagnosticTaskId = task.id
+                    diagnosticRunId = run.id
+                    val dispatchState = AgentTaskScheduler.state(this@AgentTaskJobService)
+                    val conditionsMatch = AgentTaskRules.conditionsMatch(JSONObject(task.triggerJson), dispatchState)
+                    AgentTaskDiagnostics.recordConditionCheck(
+                        this@AgentTaskJobService, task.id, dispatchState, conditionsMatch, run.id,
+                    )
                     // deadline 可能越过网络约束；离线时保留队列，不调用模型或消耗执行次数。
-                    if (AgentTaskScheduler.state(this@AgentTaskJobService)["networkConnected"] != true) {
+                    if (dispatchState["networkConnected"] != true) {
                         deferred = true
                         deferredDelay = 15 * 60_000L
                         return@runBlocking
@@ -65,10 +78,7 @@ internal class AgentTaskJobService : JobService() {
                     // Conditions can change while a run is queued (for example the
                     // charger is removed before Android starts this job). Recheck
                     // at dispatch, not just when the time/event was enqueued.
-                    if (!AgentTaskRules.conditionsMatch(
-                            JSONObject(task.triggerJson),
-                            AgentTaskScheduler.state(this@AgentTaskJobService)
-                        )) {
+                    if (!conditionsMatch) {
                         deferred = true
                         deferredDelay = 15 * 60_000L
                         return@runBlocking
@@ -76,7 +86,9 @@ internal class AgentTaskJobService : JobService() {
                     val client = AgentRuntimeClient(this@AgentTaskJobService, AndroidAgentLogger)
                     when (val active = client.queryActiveRun()) {
                         is AgentRuntimeClient.ActiveRunQuery.Known -> if (active.runId != null) {
-                            deferred = true; return@runBlocking
+                            AgentTaskDiagnostics.recordRunBusy(this@AgentTaskJobService, task.id, run.id)
+                            deferred = true
+                            return@runBlocking
                         }
 
                         AgentRuntimeClient.ActiveRunQuery.Unavailable -> {
@@ -85,14 +97,28 @@ internal class AgentTaskJobService : JobService() {
                     }
                     // 按官方 Repository 的 suspend API 解析当前已选模型与工具权限；
                     // GUI 前台操作与自动任务安全策略由 Runtime policy 在模块进程强制执行。
-                    val config = RuntimeConfigRepository.currentRuntimeConfig()
+                    val taskPermissions = AgentRuntimePolicy.permissions(Prefs.localAgentPreferences())
+                    val config = RuntimeConfigRepository.currentRuntimeConfig()?.let { model ->
+                        AgentTaskRuntimeConfig.withToolPermissions(model, taskPermissions)
+                    }
                     // 账号登录（OAuth）的凭据不走 apiKey，不能按「key 为空」判成没配置。
                     if (config == null || (!ProviderAuthModes.isOAuth(config.authMode) && config.apiKey.isBlank())) {
                         // 静默失败没人看得懂：把原因写进运行记录，用户点开就知道为什么没跑。
+                        val actualAt = System.currentTimeMillis()
+                        AgentTaskDiagnostics.recordScheduleObserved(
+                            this@AgentTaskJobService, task.id, run.id, run.fireKey, actualAt,
+                            dispatchState["charging"], dispatchState["unlocked"],
+                            dispatchState["networkConnected"] == true, conditionsMatch,
+                            phase = "dispatch_failed",
+                        )
+                        AgentTaskDiagnostics.recordRunFinished(
+                            this@AgentTaskJobService, task.id, run.id, "configuration_required",
+                            "CONFIGURATION_REQUIRED",
+                        )
                         dao.complete(
                             run,
                             "configuration_required",
-                            System.currentTimeMillis(),
+                            actualAt,
                             if (config == null) {
                                 "没有可用的模型：请先在「模型服务」里选一个已启用的服务商与模型，再重新触发这条任务。"
                             } else {
@@ -101,15 +127,34 @@ internal class AgentTaskJobService : JobService() {
                             }
                         ); return@runBlocking
                     }
-                    if (stopped.get() || dao.claim(
-                            run.id,
-                            System.currentTimeMillis()
-                        ) != 1
-                    ) return@runBlocking
-                    claimedRun = run
+                    val claimedAt = System.currentTimeMillis()
+                    if (stopped.get() || dao.claim(run.id, claimedAt) != 1) return@runBlocking
+                    val startedRun = run.copy(status = "running", startedAt = claimedAt)
+                    claimedRun = startedRun
                     activeRunId = run.id
                     cancelRetryNotification()
                     AgentTaskScheduler.register(run.id, task.id)
+                    AgentTaskDiagnostics.recordScheduleObserved(
+                        this@AgentTaskJobService, task.id, run.id, run.fireKey, claimedAt,
+                        dispatchState["charging"], dispatchState["unlocked"],
+                        dispatchState["networkConnected"] == true, conditionsMatch, phase = "started",
+                    )
+                    AgentTaskDiagnostics.recordRunStarted(
+                        context = this@AgentTaskJobService,
+                        task = task,
+                        run = startedRun,
+                        toolToggles = mapOf(
+                            "terminalTools" to config.terminalTools,
+                            "browserTools" to config.browserTools,
+                            "deviceDirectTools" to config.deviceDirectTools,
+                            "deviceSensitiveReadTools" to config.deviceSensitiveReadTools,
+                            "deviceSensitiveActionTools" to config.deviceSensitiveActionTools,
+                        ),
+                        rootStatus = RootAccess.state.value.status.name,
+                        accessibilityAvailable = AgentAccessibilityService.isAvailable(),
+                        virtualDisplayEnabled = taskPermissions.virtualDisplay,
+                        virtualDisplayActive = io.github.mangi.eta.agent.virtualdisplay.VirtualDisplayController.snapshots.value.active,
+                    )
                     val manager = getSystemService(NotificationManager::class.java)
                     manager.createNotificationChannel(
                         NotificationChannel(
@@ -154,6 +199,9 @@ internal class AgentTaskJobService : JobService() {
                                 System.currentTimeMillis(),
                                 "取消请求已在 Runtime 启动前生效。",
                             )
+                            AgentTaskDiagnostics.recordRunFinished(
+                                this@AgentTaskJobService, task.id, run.id, "cancelled", "CANCELLED",
+                            )
                         } else {
                             dao.defer(run.id)
                             deferred = true
@@ -162,15 +210,28 @@ internal class AgentTaskJobService : JobService() {
                         return@runBlocking
                     }
                     val result = client.run(request) { event ->
-                        if (event is AgentEvent.ToolStarted) {
-                            touchedAny.set(true)
-                            showProgress(event.name)
+                        when (event) {
+                            is AgentEvent.ToolStarted -> {
+                                touchedAny.set(true)
+                                AgentTaskDiagnostics.recordToolStarted(
+                                    this@AgentTaskJobService, task.id, run.id, event.name,
+                                )
+                                showProgress(event.name)
+                            }
+                            is AgentEvent.ToolFinished -> {
+                                AgentTaskDiagnostics.recordToolFinished(
+                                    this@AgentTaskJobService, task.id, run.id,
+                                    event.name, event.success, event.resultSummary,
+                                )
+                                showProgress(getString(R.string.automation_running))
+                            }
+                            else -> Unit
                         }
-                        if (event is AgentEvent.ToolFinished) showProgress(getString(R.string.automation_running))
                     }
                     // 客户端中断已发送取消；清除线程标记，仅完成持久化收尾。
                     Thread.interrupted()
                     if (result.error == "AUTOMATION_RUNTIME_BUSY") {
+                        AgentTaskDiagnostics.recordRunBusy(this@AgentTaskJobService, task.id, run.id)
                         dao.defer(run.id)
                         deferred = true
                     } else if (result.error == "AUTOMATION_CANCELLED" &&
@@ -221,11 +282,15 @@ internal class AgentTaskJobService : JobService() {
                                 }
                             }
                             cancelRetryNotification()
+                            val finishedAt = System.currentTimeMillis()
                             dao.complete(
                                 run,
                                 status,
-                                System.currentTimeMillis(),
+                                finishedAt,
                                 result.content.ifBlank { result.error.orEmpty() }.take(1000)
+                            )
+                            AgentTaskDiagnostics.recordRunFinished(
+                                this@AgentTaskJobService, task.id, run.id, status, result.error,
                             )
                             if (status == "failed" && retry != null) notifyFailure(task.name, retry)
                             if (status in setOf("completed", "failed")) {
@@ -246,6 +311,14 @@ internal class AgentTaskJobService : JobService() {
                     runBlocking {
                         EtaDatabase.get(this@AgentTaskJobService).agentTaskDao()
                             .complete(run, "interrupted", System.currentTimeMillis(), "")
+                    }
+                }
+                diagnosticTaskId?.let { taskId ->
+                    diagnosticRunId?.let { runId ->
+                        AgentTaskDiagnostics.recordRunFinished(
+                            this@AgentTaskJobService, taskId, runId,
+                            if (claimedRun == null) "failed" else "interrupted", "UNKNOWN",
+                        )
                     }
                 }
                 if (!stopped.get()) AndroidAgentLogger.warn("Automation job failed: type=${error.safeLogType()}")

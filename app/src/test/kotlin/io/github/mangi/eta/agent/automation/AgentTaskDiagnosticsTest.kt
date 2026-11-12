@@ -5,6 +5,8 @@ import io.github.mangi.eta.data.db.AgentTaskRunEntity
 import io.github.mangi.eta.data.db.EtaDatabase
 import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
+import java.io.File
+import java.util.UUID
 import java.util.zip.ZipInputStream
 import kotlinx.coroutines.runBlocking
 import org.json.JSONArray
@@ -169,10 +171,15 @@ class AgentTaskDiagnosticsTest {
 
     @Test
     fun absentLogIsExplicitlyHistoricalButNotClaimedAsRetentionTruncated() = runBlocking {
-        val task = task(id = "task-with-no-events")
+        val task = task(id = "task-with-no-events-${UUID.randomUUID()}")
+        val directory = context.getDir("agent_task_diagnostics", android.content.Context.MODE_PRIVATE)
+        val logFile = File(directory, AgentTaskDiagnostics.taskLogFileName(task.id))
+        listOf(logFile, File(logFile.path + ".bak"), File(logFile.path + ".new")).forEach { it.delete() }
         EtaDatabase.get(context).agentTaskDao().insertTask(task)
+        assertFalse("fixture begins without a safe diagnostic file", logFile.isFile)
 
         val archive = export(task.id)
+        assertFalse("export must not create a safe log", logFile.isFile)
         val manifest = JSONObject(archive.getValue("manifest.json"))
         assertFalse(manifest.getBoolean("diagnosticLogPresent"))
         assertFalse(manifest.getBoolean("truncated"))

@@ -218,6 +218,83 @@ class AgentTaskFullCaptureExportTest {
     }
 
     @Test
+    fun safeProjectionKeepsImeFailureBranchEnumsAndDropsUnknownBranchText() = runBlocking {
+        val taskId = "safe-ime-export-${UUID.randomUUID()}"
+        val runId = "safe-ime-run-${UUID.randomUUID()}"
+        val dao = EtaDatabase.get(context).agentTaskDao()
+        dao.insertTask(task(taskId))
+        dao.insertRun(
+            AgentTaskRunEntity(
+                id = runId,
+                taskId = taskId,
+                fireKey = "manual:ime",
+                status = "completed",
+                queuedAt = 1_000,
+                startedAt = 1_000,
+                finishedAt = 1_001,
+            ),
+        )
+        assertTrue(withContext(Dispatchers.IO) {
+            AgentTaskDiagnostics.setFullCaptureEnabled(context, taskId, enabled = false)
+        })
+
+        val expectedBranches = setOf(
+            "IME_POLICY",
+            "IME_SERVICE_LOOKUP",
+            "IME_SET_METHOD_LOOKUP",
+            "IME_SET_METHOD_INVOCATION",
+            "IME_GET_METHOD_LOOKUP",
+            "IME_GET_METHOD_INVOCATION",
+            "IME_READBACK_MISMATCH",
+        )
+        expectedBranches.forEach { name ->
+            AgentTaskDiagnostics.recordDisplayFailureDetailForRun(
+                context,
+                runId,
+                AutomationDisplayFailureDetail(
+                    reason = AutomationDisplayFailure.ROOT_BRIDGE_FAILED,
+                    stage = AutomationDisplayFailureDetail.Stage.DISPLAY_ISOLATION,
+                    code = AutomationDisplayFailureDetail.Code.DISPLAY_ISOLATION_UNAVAILABLE,
+                    branch = AutomationDisplayFailureDetail.Branch.valueOf(name),
+                ),
+            )
+        }
+
+        val baselineOutput = ByteArrayOutputStream()
+        AgentTaskDiagnostics.export(context, taskId, baselineOutput, includeSensitive = true)
+        val baseline = unzip(baselineOutput.toByteArray())
+        assertFalse(baseline.containsKey("full_diagnostics.json"))
+        val safeEvents = JSONArray(baseline.getValue("events.json"))
+        val projectedBranches = (0 until safeEvents.length())
+            .map { safeEvents.getJSONObject(it).optString("branch") }
+            .filter { it.isNotBlank() }
+            .toSet()
+        assertEquals(expectedBranches, projectedBranches)
+
+        val rawFile = AgentTaskDiagnostics.retainedFilesForTests(context).single()
+        val rawRoot = JSONObject(rawFile.readText())
+        rawRoot.getJSONArray("events").put(
+            JSONObject()
+                .put("type", "display_failure")
+                .put("runKey", AgentTaskDiagnostics.hashIdentifier(runId))
+                .put("reason", AgentTaskDiagnostics.DisplayFailure.ROOT_BRIDGE_FAILED.name)
+                .put("branch", "IME_UNTRUSTED_TEXT_SHOULD_NOT_EXPORT"),
+        )
+        rawFile.writeText(rawRoot.toString())
+
+        val filteredOutput = ByteArrayOutputStream()
+        AgentTaskDiagnostics.export(context, taskId, filteredOutput, includeSensitive = true)
+        val filtered = unzip(filteredOutput.toByteArray())
+        val filteredText = filtered.values.joinToString("\n")
+        assertFalse(filteredText.contains("IME_UNTRUSTED_TEXT_SHOULD_NOT_EXPORT"))
+        val filteredEvents = JSONArray(filtered.getValue("events.json"))
+        val unknownBranchEvent = (0 until filteredEvents.length())
+            .map { filteredEvents.getJSONObject(it) }
+            .single { it.optString("reason") == "ROOT_BRIDGE_FAILED" && !it.has("branch") }
+        assertEquals("display_failure", unknownBranchEvent.getString("type"))
+    }
+
+    @Test
     fun fullCaptureRetentionBoundsTaskCountAndUsesHashedPaths() {
         for (index in 0..AgentTaskFullCapture.MAX_TASKS) {
             val taskId = "retention-private-task-$index"

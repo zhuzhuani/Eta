@@ -445,36 +445,26 @@ internal object VirtualDisplayCommandMain {
     }
 
     private fun applyDisplayImePolicyHide(displayId: Int): Boolean {
-        var branch = AutomationDisplayFailureDetail.Branch.SYSTEM_CONTEXT
-        fun unavailable(error: Throwable? = null): Boolean {
+        if (!CanvasRoutingPolicy.isVirtualDisplay(displayId)) {
+            recordFailure(
+                AutomationDisplayFailureDetail.Stage.DISPLAY_ISOLATION,
+                AutomationDisplayFailureDetail.Code.DISPLAY_ISOLATION_UNAVAILABLE,
+                branch = AutomationDisplayFailureDetail.Branch.IME_POLICY,
+            )
+            return false
+        }
+        switchToSystemUidIfPossible()
+        return applyImePolicyHide(
+            access = ReflectiveImePolicyAccess(),
+            displayId = displayId,
+            expectedPolicy = CanvasRoutingPolicy.DISPLAY_IME_POLICY_HIDE,
+        ) { branch, error ->
             recordFailure(
                 AutomationDisplayFailureDetail.Stage.DISPLAY_ISOLATION,
                 AutomationDisplayFailureDetail.Code.DISPLAY_ISOLATION_UNAVAILABLE,
                 error,
                 branch,
             )
-            return false
-        }
-        return try {
-            if (!CanvasRoutingPolicy.isVirtualDisplay(displayId)) {
-                branch = AutomationDisplayFailureDetail.Branch.IME_POLICY
-                return unavailable()
-            }
-            switchToSystemUidIfPossible()
-            branch = AutomationDisplayFailureDetail.Branch.IME_POLICY
-            val wmgClass = Class.forName("android.view.WindowManagerGlobal")
-            val wms = wmgClass.getMethod("getWindowManagerService").invoke(null) ?: return unavailable()
-            val setPolicy = wms.javaClass.methods.firstOrNull {
-                it.name == "setDisplayImePolicy" && it.parameterCount == 2
-            } ?: return unavailable()
-            setPolicy.invoke(wms, displayId, CanvasRoutingPolicy.DISPLAY_IME_POLICY_HIDE)
-            val getPolicy = wms.javaClass.methods.firstOrNull {
-                it.name == "getDisplayImePolicy" && it.parameterCount == 1
-            }
-            val actual = getPolicy?.invoke(wms, displayId) as? Int
-            if (actual == CanvasRoutingPolicy.DISPLAY_IME_POLICY_HIDE) true else unavailable()
-        } catch (exception: Throwable) {
-            unavailable(exception)
         }
     }
 

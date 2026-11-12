@@ -94,6 +94,12 @@ internal data class AutomationDisplayFailureDetail(
         DISPLAY_MANAGER_LOOKUP,
         DISPLAY_FLAGS,
         IME_POLICY,
+        IME_SERVICE_LOOKUP,
+        IME_SET_METHOD_LOOKUP,
+        IME_SET_METHOD_INVOCATION,
+        IME_GET_METHOD_LOOKUP,
+        IME_GET_METHOD_INVOCATION,
+        IME_READBACK_MISMATCH,
     }
 
     companion object {

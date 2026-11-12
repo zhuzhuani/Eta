@@ -840,6 +840,7 @@ internal object AgentTaskDiagnostics {
 
     private fun addDisplayFailureMetadata(projected: JSONObject, raw: JSONObject): Boolean {
         var omitted = false
+        // Derive this closed allowlist from the diagnostic enums so additive IME branches remain safe.
         val enumFields = listOf(
             "stage" to AutomationDisplayFailureDetail.Stage.entries.map { it.name }.toSet(),
             "code" to AutomationDisplayFailureDetail.Code.entries.map { it.name }.toSet(),

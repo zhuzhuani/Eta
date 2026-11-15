@@ -322,7 +322,14 @@ internal class RootVirtualDisplayBridge private constructor(
             val parsed = rawJson?.takeIf { it.startsWith("{") }?.let { runCatching { JSONObject(it) }.getOrNull() }
             if (parsed != null) {
                 val fields = listOf("code", "reason", "flags", "missing", "actual_policy", "error_type", "type", "uid")
-                    .filter(parsed::has).joinToString(" ") { "$it=${parsed.opt(it)}" }
+                    .filter(parsed::has).joinToString(" ") {
+                        val label = when (it) {
+                            "actual_policy" -> "actualPolicy"
+                            "error_type" -> "errorType"
+                            else -> it
+                        }
+                        "$label=${parsed.opt(it)}"
+                    }
                 if (fields.isNotBlank()) return "Virtual display bridge rejected: $fields"
             }
             return "Virtual display bridge rejected: awaited=$awaited displayId=$resolvedDisplayId disconnected=$disconnected alive=$alive"

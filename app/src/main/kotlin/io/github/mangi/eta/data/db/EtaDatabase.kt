@@ -28,7 +28,7 @@ import androidx.room.migration.Migration
         AgentTaskEntity::class,
         AgentTaskRunEntity::class,
     ],
-    version = 26,
+    version = 27,
     exportSchema = false,
 )
 internal abstract class EtaDatabase : RoomDatabase() {
@@ -72,6 +72,7 @@ internal abstract class EtaDatabase : RoomDatabase() {
                         MIGRATION_23_24,
                         MIGRATION_24_25,
                         MIGRATION_25_26,
+                        MIGRATION_26_27,
                     )
                     .addCallback(object : Callback() {
                         override fun onCreate(db: androidx.sqlite.db.SupportSQLiteDatabase) { createTextChunkCleanup(db) }
@@ -139,9 +140,42 @@ internal abstract class EtaDatabase : RoomDatabase() {
         }
 
         internal val MIGRATION_25_26 = Migration(25, 26) { database ->
+            createAgentTaskTables(database)
+            addConversationMetricColumns(database)
+        }
+
+        // Version 26 was published independently with different schemas. Normalize both
+        // lineages here: CREATE/column guards preserve data when the change already exists.
+        internal val MIGRATION_26_27 = Migration(26, 27) { database ->
+            createAgentTaskTables(database)
+            addConversationMetricColumns(database)
+        }
+
+        private fun createAgentTaskTables(database: androidx.sqlite.db.SupportSQLiteDatabase) {
             database.execSQL("CREATE TABLE IF NOT EXISTS agent_tasks (id TEXT NOT NULL, name TEXT NOT NULL, prompt TEXT NOT NULL, triggerJson TEXT NOT NULL, enabled INTEGER NOT NULL, nextRunAt INTEGER, cooldownSeconds INTEGER NOT NULL, maxRuns INTEGER NOT NULL, runCount INTEGER NOT NULL, lastStartedAt INTEGER, lastStatus TEXT NOT NULL, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL, PRIMARY KEY(id))")
             database.execSQL("CREATE TABLE IF NOT EXISTS agent_task_runs (id TEXT NOT NULL, taskId TEXT NOT NULL, fireKey TEXT NOT NULL, status TEXT NOT NULL, eventJson TEXT NOT NULL, queuedAt INTEGER NOT NULL, startedAt INTEGER, finishedAt INTEGER, resultPreview TEXT NOT NULL, cancelRequested INTEGER NOT NULL, PRIMARY KEY(id))")
             database.execSQL("CREATE UNIQUE INDEX IF NOT EXISTS index_agent_task_runs_taskId_fireKey ON agent_task_runs(taskId, fireKey)")
+        }
+
+        private fun addConversationMetricColumns(database: androidx.sqlite.db.SupportSQLiteDatabase) {
+            if (!hasColumn(database, "conversation_messages", "cache_write_tokens")) {
+                database.execSQL("ALTER TABLE conversation_messages ADD COLUMN cache_write_tokens INTEGER")
+            }
+            if (!hasColumn(database, "conversation_messages", "compaction_archive_id")) {
+                database.execSQL("ALTER TABLE conversation_messages ADD COLUMN compaction_archive_id TEXT")
+            }
+        }
+
+        private fun hasColumn(
+            database: androidx.sqlite.db.SupportSQLiteDatabase,
+            table: String,
+            column: String,
+        ): Boolean = database.query("PRAGMA table_info(`$table`)").use { cursor ->
+            val nameIndex = cursor.getColumnIndex("name")
+            while (cursor.moveToNext()) {
+                if (cursor.getString(nameIndex) == column) return@use true
+            }
+            false
         }
 
         private fun createTextChunkCleanup(database: androidx.sqlite.db.SupportSQLiteDatabase) {

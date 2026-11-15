@@ -134,6 +134,7 @@ internal class RootVirtualDisplayBridge private constructor(
                 val readyLatch = CountDownLatch(1)
                 val disconnected = AtomicBoolean(false)
                 var resolvedDisplayId: Int? = null
+                var failureResultLine: String? = null
                 val payload = JSONObject()
                     .put("action", "hold_display")
                     .put("user_id", DeviceToolContract.appUserId(appContext))
@@ -173,6 +174,7 @@ internal class RootVirtualDisplayBridge private constructor(
                                     }
                                     readyLatch.countDown()
                                 } else if (line.startsWith(VirtualDisplayCommandMain.RESULT_PREFIX)) {
+                                    failureResultLine = line
                                     parseHelperResult(
                                         line.removePrefix(VirtualDisplayCommandMain.RESULT_PREFIX),
                                         ::reportDetail,
@@ -232,17 +234,16 @@ internal class RootVirtualDisplayBridge private constructor(
                     if (!failureReported.get()) {
                         val exitedBeforeReady = id == null && (disconnected.get() || !started.isAlive)
                         reportFailure(
-                            if (id == null && !exitedBeforeReady) {
-                                AutomationDisplayFailureDetail.Stage.REQUEST_HANDSHAKE
-                            } else {
-                                AutomationDisplayFailureDetail.Stage.PROCESS_LIFECYCLE
-                            },
+                            if (id == null && !exitedBeforeReady) AutomationDisplayFailureDetail.Stage.REQUEST_HANDSHAKE
+                            else AutomationDisplayFailureDetail.Stage.PROCESS_LIFECYCLE,
                             when {
                                 exitedBeforeReady || id != null -> AutomationDisplayFailureDetail.Code.PROCESS_EXITED
                                 else -> AutomationDisplayFailureDetail.Code.MALFORMED_RESULT
                             },
                         )
                     }
+                    AndroidAgentLogger.warn(formatFailureSummary(
+                        failureResultLine, awaited, id, disconnected.get(), started.isAlive))
                     return null
                 }
                 accepted = true
@@ -288,31 +289,43 @@ internal class RootVirtualDisplayBridge private constructor(
             else -> AutomationDisplayFailure.ROOT_BRIDGE_FAILED
         }
 
-        private fun parseHelperResult(
-            payload: String,
-            onFailure: (AutomationDisplayFailureDetail) -> Unit,
-        ) {
-            val failure = runCatching { JSONObject(payload) }.getOrNull()?.let { result ->
-                if (result.optBoolean("ok", false)) return
-                AutomationDisplayFailureDetail.fromHelperFields(
-                    stageValue = result.optString("stage").takeIf { it != "null" },
-                    codeValue = result.optString("code").takeIf { it != "null" },
-                    exceptionValue = result.optString("exception_kind").takeIf { it != "null" },
-                    causeValue = result.optString("cause_kind").takeIf { it != "null" },
-                    sdkIntValue = result.optInt("sdk_int", -1).takeIf { it >= 0 },
-                    processUidValue = result.optInt("process_uid", -1).takeIf { it >= 0 },
-                    branchValue = result.optString("branch").takeIf { it != "null" },
-                )
-            }
-            onFailure(
-                failure ?: AutomationDisplayFailureDetail(
-                    reason = AutomationDisplayFailure.ROOT_BRIDGE_FAILED,
-                    stage = AutomationDisplayFailureDetail.Stage.REQUEST_HANDSHAKE,
-                    code = AutomationDisplayFailureDetail.Code.MALFORMED_RESULT,
-                    sdkInt = android.os.Build.VERSION.SDK_INT,
-                    processUid = null,
-                ),
+        private fun parseHelperResult(payload: String, onFailure: (AutomationDisplayFailureDetail) -> Unit) {
+            val result = runCatching { JSONObject(payload) }.getOrNull() ?: return
+            if (result.optBoolean("ok", false)) return
+            val fromLegacy = AutomationDisplayFailureDetail.fromHelperFields(
+                stageValue = result.optString("stage").takeIf { it != "null" },
+                codeValue = result.optString("code").takeIf { it != "null" },
+                exceptionValue = result.optString("exception_kind").takeIf { it != "null" },
+                causeValue = result.optString("cause_kind").takeIf { it != "null" },
+                sdkIntValue = result.optInt("sdk_int", -1).takeIf { it >= 0 },
+                processUidValue = result.optInt("process_uid", -1).takeIf { it >= 0 },
+                branchValue = result.optString("branch").takeIf { it != "null" },
             )
+            val failure = fromLegacy ?: AutomationDisplayFailureDetail(
+                reason = AutomationDisplayFailure.ROOT_BRIDGE_FAILED,
+                stage = AutomationDisplayFailureDetail.Stage.DISPLAY_ISOLATION,
+                code = AutomationDisplayFailureDetail.Code.DISPLAY_ISOLATION_UNAVAILABLE,
+                exceptionKind = AutomationDisplayFailureDetail.ExceptionKind.entries.firstOrNull { it.name == result.optString("error_type") },
+                sdkInt = result.optInt("sdk_int", android.os.Build.VERSION.SDK_INT),
+                processUid = result.optInt("uid", result.optInt("process_uid", -1)).takeIf { it >= 0 },
+                branch = if (result.optString("reason") == "MISSING_DISPLAY_FLAGS")
+                    AutomationDisplayFailureDetail.Branch.DISPLAY_FLAGS
+                else AutomationDisplayFailureDetail.Branch.IME_POLICY,
+            )
+            onFailure(failure)
+        }
+
+        internal fun formatFailureSummary(
+            resultLine: String?, awaited: Boolean, resolvedDisplayId: Int?, disconnected: Boolean, alive: Boolean,
+        ): String {
+            val rawJson = resultLine?.removePrefix(VirtualDisplayCommandMain.RESULT_PREFIX)?.trim()
+            val parsed = rawJson?.takeIf { it.startsWith("{") }?.let { runCatching { JSONObject(it) }.getOrNull() }
+            if (parsed != null) {
+                val fields = listOf("code", "reason", "flags", "missing", "actual_policy", "error_type", "type", "uid")
+                    .filter(parsed::has).joinToString(" ") { "$it=${parsed.opt(it)}" }
+                if (fields.isNotBlank()) return "Virtual display bridge rejected: $fields"
+            }
+            return "Virtual display bridge rejected: awaited=$awaited displayId=$resolvedDisplayId disconnected=$disconnected alive=$alive"
         }
     }
 }

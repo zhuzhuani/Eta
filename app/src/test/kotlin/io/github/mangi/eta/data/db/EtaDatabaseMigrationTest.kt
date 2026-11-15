@@ -22,7 +22,45 @@ import org.robolectric.annotation.Config
 @Config(sdk = [36])
 class EtaDatabaseMigrationTest {
     @Test
-    fun migration6To26PreservesDataAndMovesCompleteConversationContext() {
+    fun migration26To27MergesEitherPublishedSchemaWithoutLosingData() {
+        val context = RuntimeEnvironment.getApplication() as Context
+        listOf(false, true).forEach { forkSchema ->
+            val name = "migration-26-${UUID.randomUUID()}.db"
+            val configuration = SupportSQLiteOpenHelper.Configuration.builder(context)
+                .name(name)
+                .callback(object : SupportSQLiteOpenHelper.Callback(26) {
+                    override fun onCreate(db: SupportSQLiteDatabase) {
+                        db.execSQL("CREATE TABLE conversation_messages (id TEXT NOT NULL PRIMARY KEY" +
+                            if (forkSchema) ")" else ", cache_write_tokens INTEGER, compaction_archive_id TEXT)")
+                        db.execSQL("INSERT INTO conversation_messages (id) VALUES ('message-26')")
+                        if (forkSchema) {
+                            db.execSQL("CREATE TABLE agent_tasks (id TEXT NOT NULL PRIMARY KEY, name TEXT NOT NULL, prompt TEXT NOT NULL, triggerJson TEXT NOT NULL, enabled INTEGER NOT NULL, nextRunAt INTEGER, cooldownSeconds INTEGER NOT NULL, maxRuns INTEGER NOT NULL, runCount INTEGER NOT NULL, lastStartedAt INTEGER, lastStatus TEXT NOT NULL, createdAt INTEGER NOT NULL, updatedAt INTEGER NOT NULL)")
+                            db.execSQL("INSERT INTO agent_tasks VALUES ('task-26', 'task', '', '{}', 1, NULL, 0, 1, 0, NULL, 'ready', 1, 1)")
+                        }
+                    }
+                    override fun onUpgrade(db: SupportSQLiteDatabase, oldVersion: Int, newVersion: Int) = Unit
+                }).build()
+            val helper = FrameworkSQLiteOpenHelperFactory().create(configuration)
+            try {
+                EtaDatabase.MIGRATION_26_27.migrate(helper.writableDatabase)
+                val db = helper.readableDatabase
+                db.query("SELECT id, cache_write_tokens, compaction_archive_id FROM conversation_messages").use { c ->
+                    check(c.moveToFirst())
+                    assertEquals("message-26", c.getString(0))
+                    assertEquals(true, c.isNull(1))
+                    assertEquals(true, c.isNull(2))
+                }
+                assertEquals(if (forkSchema) 1 else 0, db.query("SELECT COUNT(*) FROM agent_tasks WHERE id = 'task-26'").use { it.moveToFirst(); it.getInt(0) })
+                db.query("SELECT taskId, fireKey FROM agent_task_runs LIMIT 0").use { }
+            } finally {
+                helper.close()
+                context.deleteDatabase(name)
+            }
+        }
+    }
+
+    @Test
+    fun migration6To27PreservesDataAndMovesCompleteConversationContext() {
         val context = RuntimeEnvironment.getApplication() as Context
         val databaseName = "migration-${UUID.randomUUID()}.db"
         createVersion6Database(context, databaseName)
@@ -60,6 +98,7 @@ class EtaDatabaseMigrationTest {
                 EtaDatabase.MIGRATION_23_24,
                 EtaDatabase.MIGRATION_24_25,
                 EtaDatabase.MIGRATION_25_26,
+                EtaDatabase.MIGRATION_26_27,
             )
             .build()
         try {
@@ -129,6 +168,8 @@ class EtaDatabaseMigrationTest {
             assertEquals(ProviderAuthModes.API_KEY, provider.authMode)
             assertEquals("fixture-existing-api-key", provider.apiKey)
             assertEquals(false, migratedMessage.isEdited)
+            assertEquals(null, migratedMessage.cacheWriteTokens)
+            assertEquals(null, migratedMessage.compactionArchiveId)
             assertEquals(emptyList<RuntimeInFlightRunWithEvents>(), inFlightRuns)
             assertEquals(listOf("mcp-1"), mcpServers.map { it.id })
             assertEquals(null, mcpServers.single().toolsExpireAt)

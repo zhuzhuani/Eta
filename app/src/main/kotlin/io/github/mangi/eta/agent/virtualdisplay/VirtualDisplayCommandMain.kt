@@ -15,6 +15,7 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import kotlin.system.exitProcess
 import org.json.JSONObject
+import org.lsposed.hiddenapibypass.HiddenApiBypass
 
 /**
  * 进程内 Surface 临时登记表。
@@ -104,6 +105,7 @@ internal object VirtualDisplayCommandMain {
                 )
                 exitProcess(1)
             }
+            exemptHiddenApis()
             if (Looper.getMainLooper() == null) Looper.prepareMainLooper()
             val reader = BufferedReader(InputStreamReader(System.`in`, Charsets.UTF_8))
             val firstLine = reader.readLine()?.trim().orEmpty()
@@ -206,34 +208,39 @@ internal object VirtualDisplayCommandMain {
         retainedSurface = surface
         if (automation && !acquireAutomationDisplayWakeLock(displayId)) {
             releaseRetainedDisplay()
-            emitFailure(
-                AutomationDisplayFailureDetail.Stage.DISPLAY_WAKE_LOCK,
+            emitFailure(AutomationDisplayFailureDetail.Stage.DISPLAY_WAKE_LOCK,
                 AutomationDisplayFailureDetail.Code.DISPLAY_WAKE_LOCK_UNAVAILABLE,
-                branch = AutomationDisplayFailureDetail.Branch.DISPLAY_WAKE_LOCK,
-            )
+                branch = AutomationDisplayFailureDetail.Branch.DISPLAY_WAKE_LOCK)
             exitProcess(1)
         }
-        if (!CanvasRoutingPolicy.hasRequiredDisplayFlags(virtualDisplay.display.flags)) {
-            recordFailure(
-                AutomationDisplayFailureDetail.Stage.DISPLAY_ISOLATION,
+        val displayFlags = virtualDisplay.display.flags
+        if (!CanvasRoutingPolicy.hasRequiredDisplayFlags(displayFlags)) {
+            recordFailure(AutomationDisplayFailureDetail.Stage.DISPLAY_ISOLATION,
                 AutomationDisplayFailureDetail.Code.DISPLAY_ISOLATION_UNAVAILABLE,
-                branch = AutomationDisplayFailureDetail.Branch.DISPLAY_FLAGS,
-            )
+                branch = AutomationDisplayFailureDetail.Branch.DISPLAY_FLAGS)
             releaseRetainedDisplay()
-            emitFailure(
-                AutomationDisplayFailureDetail.Stage.DISPLAY_ISOLATION,
-                AutomationDisplayFailureDetail.Code.DISPLAY_ISOLATION_UNAVAILABLE,
-                branch = AutomationDisplayFailureDetail.Branch.DISPLAY_FLAGS,
-            )
+            println(RESULT_PREFIX + JSONObject()
+                .put("ok", false).put("code", "DISPLAY_ISOLATION_UNAVAILABLE")
+                .put("reason", "MISSING_DISPLAY_FLAGS")
+                .put("flags", "0x${Integer.toHexString(displayFlags)}")
+                .put("missing", CanvasRoutingPolicy.missingDisplayFlagsDescription(displayFlags))
+                .put("uid", Process.myUid()))
+            System.out.flush()
             exitProcess(1)
         }
-        if (!applyDisplayImePolicyHide(displayId)) {
-            releaseRetainedDisplay()
-            emitFailure(
-                AutomationDisplayFailureDetail.Stage.DISPLAY_ISOLATION,
+        val imePolicyResult = applyDisplayImePolicyHide(displayId)
+        if (!imePolicyResult.ok) {
+            recordFailure(AutomationDisplayFailureDetail.Stage.DISPLAY_ISOLATION,
                 AutomationDisplayFailureDetail.Code.DISPLAY_ISOLATION_UNAVAILABLE,
-                branch = AutomationDisplayFailureDetail.Branch.IME_POLICY,
-            )
+                branch = AutomationDisplayFailureDetail.Branch.IME_POLICY)
+            releaseRetainedDisplay()
+            val errorJson = JSONObject().put("ok", false)
+                .put("code", "DISPLAY_ISOLATION_UNAVAILABLE")
+                .put("reason", imePolicyResult.reason).put("uid", Process.myUid())
+            imePolicyResult.actualPolicy?.let { errorJson.put("actual_policy", it) }
+            imePolicyResult.errorType?.let { errorJson.put("error_type", it) }
+            println(RESULT_PREFIX + errorJson)
+            System.out.flush()
             exitProcess(1)
         }
 
@@ -404,13 +411,9 @@ internal object VirtualDisplayCommandMain {
         error: Throwable? = null,
         branch: AutomationDisplayFailureDetail.Branch? = null,
     ) {
-        failureInfo = FailureInfo(
-            stage = stage,
-            code = code,
-            exceptionKind = AutomationDisplayFailureDetail.safeExceptionKind(error),
-            causeKind = AutomationDisplayFailureDetail.safeCauseKind(error),
-            branch = branch,
-        )
+        failureInfo = FailureInfo(stage, code,
+            AutomationDisplayFailureDetail.safeExceptionKind(error),
+            AutomationDisplayFailureDetail.safeCauseKind(error), branch)
     }
 
     private fun emitFailure(
@@ -421,18 +424,18 @@ internal object VirtualDisplayCommandMain {
     ) {
         if (failureInfo == null) recordFailure(stage, code, error, branch)
         val detail = failureInfo ?: FailureInfo(stage, code)
-        println(
-            RESULT_PREFIX + JSONObject()
-                .put("ok", false)
-                .put("stage", detail.stage.name)
-                .put("code", detail.code.name)
-                .put("exception_kind", detail.exceptionKind?.name)
-                .put("cause_kind", detail.causeKind?.name)
-                .put("sdk_int", android.os.Build.VERSION.SDK_INT)
-                .put("process_uid", Process.myUid())
-                .put("branch", detail.branch?.name),
-        )
+        println(RESULT_PREFIX + JSONObject()
+            .put("ok", false).put("stage", detail.stage.name).put("code", detail.code.name)
+            .put("exception_kind", detail.exceptionKind?.name).put("cause_kind", detail.causeKind?.name)
+            .put("sdk_int", android.os.Build.VERSION.SDK_INT).put("process_uid", Process.myUid())
+            .put("branch", detail.branch?.name))
         System.out.flush()
+    }
+
+    private fun exemptHiddenApis() {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.P) {
+            runCatching { HiddenApiBypass.addHiddenApiExemptions("Landroid/view/", "Landroid/hardware/display/", "Landroid/app/") }
+        }
     }
 
     @Suppress("DEPRECATION")
@@ -444,27 +447,47 @@ internal object VirtualDisplayCommandMain {
         }
     }
 
-    private fun applyDisplayImePolicyHide(displayId: Int): Boolean {
+    private fun applyDisplayImePolicyHide(displayId: Int): CanvasRoutingPolicy.ImePolicyCheckResult {
         if (!CanvasRoutingPolicy.isVirtualDisplay(displayId)) {
-            recordFailure(
-                AutomationDisplayFailureDetail.Stage.DISPLAY_ISOLATION,
+            recordFailure(AutomationDisplayFailureDetail.Stage.DISPLAY_ISOLATION,
                 AutomationDisplayFailureDetail.Code.DISPLAY_ISOLATION_UNAVAILABLE,
-                branch = AutomationDisplayFailureDetail.Branch.IME_POLICY,
-            )
-            return false
+                branch = AutomationDisplayFailureDetail.Branch.IME_POLICY)
+            return CanvasRoutingPolicy.ImePolicyCheckResult(false, "INVALID_DISPLAY_ID")
         }
         switchToSystemUidIfPossible()
-        return applyImePolicyHide(
-            access = ReflectiveImePolicyAccess(),
-            displayId = displayId,
-            expectedPolicy = CanvasRoutingPolicy.DISPLAY_IME_POLICY_HIDE,
-        ) { branch, error ->
-            recordFailure(
-                AutomationDisplayFailureDetail.Stage.DISPLAY_ISOLATION,
-                AutomationDisplayFailureDetail.Code.DISPLAY_ISOLATION_UNAVAILABLE,
-                error,
-                branch,
+        return try {
+            CanvasRoutingPolicy.applyDisplayImePolicyHide(
+                wms = resolveWindowManagerService(), displayId = displayId,
+                retryDelaysMs = longArrayOf(15L, 30L, 50L),
             )
+        } catch (exception: Exception) {
+            val cause = (exception as? java.lang.reflect.InvocationTargetException)?.cause ?: exception
+            CanvasRoutingPolicy.ImePolicyCheckResult(false, "WMS_LOOKUP_EXCEPTION", errorType = cause.javaClass.simpleName)
+        }
+    }
+
+    private fun resolveWindowManagerService(): Any? {
+        val directProxy = runCatching {
+            val smClass = Class.forName("android.os.ServiceManager")
+            val binder = smClass.getMethod("getService", String::class.java)
+                .invoke(null, android.content.Context.WINDOW_SERVICE) as? IBinder ?: return@runCatching null
+            val stubClass = Class.forName("android.view.IWindowManager\$Stub")
+            stubClass.getMethod("asInterface", IBinder::class.java).invoke(null, binder)
+        }.getOrNull()
+        if (directProxy != null) return directProxy
+        ensureApplicationSharedMemoryInitialized()
+        val wmgClass = Class.forName("android.view.WindowManagerGlobal")
+        return wmgClass.getMethod("getWindowManagerService").invoke(null)
+    }
+
+    private fun ensureApplicationSharedMemoryInitialized() {
+        runCatching {
+            val cls = Class.forName("com.android.internal.os.ApplicationSharedMemory")
+            val initialized = runCatching { cls.getMethod("getInstance").invoke(null) != null }.getOrDefault(false)
+            if (!initialized) {
+                val instance = cls.getMethod("create").invoke(null)
+                cls.getMethod("setInstance", cls).invoke(null, instance)
+            }
         }
     }
 
